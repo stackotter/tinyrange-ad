@@ -43,13 +43,13 @@ def main(args):
                     "Color": "#6672ff",
                     "Converters": []
                 },
-                {
-                    "Name": "service/post office",
-                    "Definition": "sport:5001",
-                    "Matches": None,
-                    "Color": "#66ff9a",
-                    "Converters": []
-                }
+                # {
+                #     "Name": "service/post office",
+                #     "Definition": "sport:5001",
+                #     "Matches": None,
+                #     "Color": "#66ff9a",
+                #     "Converters": []
+                # }
             ],
             "PcapProcessorWebhookUrls": None,
             "PcapOverIPEndpoints": [f"{teamIp}:4242"],

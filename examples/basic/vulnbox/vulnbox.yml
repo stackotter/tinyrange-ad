@@ -2,11 +2,11 @@ version: 1
 builder: alpine@3.20
 files:
     - pastebin/app.py:/root/pastebin/app.py
-    - post_office/app.py:/root/post_office/app.py
+    # - post_office/app.py:/root/post_office/app.py
     - init.py
 layers:
     - git clone https://github.com/fox-it/pcap-broker /root/pcap-broker
-    - cd /root/pcap-broker && go build .
+    - cd /root/pcap-broker && git checkout e6be4ec35fa1d78cefeeb70816d21c2b41d9f8ce && go build .
 packages:
     # Init dependencies
     - openrc

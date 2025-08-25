@@ -26,11 +26,11 @@ vulnbox:
       port: 5000
       tags:
         - public
-    - id: 2
-      name: "Post office"
-      port: 5001
-      tags:
-        - public
+    # - id: 2
+    #   name: "Post office"
+    #   port: 5001
+    #   tags:
+    #     - public
     - id: 2
       name: "PCAP Broker"
       port: 4242
@@ -61,10 +61,10 @@ vulnbox:
         command: python3 /root/pastebin/exploit1.py {{ .TargetIP }} {{ .TickSeconds }}
         timeout: 2s
         background: true
-      post_office_vuln1:
-        command: python3 /root/post_office/exploit1.py {{ .TargetIP }} {{ .TickSeconds }}
-        timeout: 2s
-        background: true
+      # post_office_vuln1:
+      #   command: python3 /root/post_office/exploit1.py {{ .TargetIP }} {{ .TickSeconds }}
+      #   timeout: 2s
+      #   background: true
 
     # Bots are not tagged the same as regular teams so they can't be targeted except explicitly by their own team.
     tags:
@@ -126,9 +126,9 @@ scorebot:
     - id: 1
       command: python3 /root/pastebin/scoring.py {{ .TargetIP }} {{ .NewFlag }} {{ .FlagId }} {{ .ServicePort }}
       timeout: 1s
-    - id: 2
-      command: python3 /root/post_office/scoring.py {{ .TargetIP }} {{ .NewFlag }} {{ .ServicePort }}
-      timeout: 1s
+    # - id: 2
+    #   command: python3 /root/post_office/scoring.py {{ .TargetIP }} {{ .NewFlag }} {{ .ServicePort }}
+    #   timeout: 1s
 
   services:
     - id: 1
@@ -155,8 +155,8 @@ scoring:
   points_per_stolen_flag: 100
   points_per_lost_flag: -100
 
-flag_valid_time: 25s
-tick_rate: 5s
+flag_valid_time: 300s
+tick_rate: 60s
 duration: 6000s
 
 timeline:
