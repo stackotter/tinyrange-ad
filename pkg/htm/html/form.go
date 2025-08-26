@@ -32,6 +32,7 @@ const (
 	FormFieldMultilineText FormFieldKind = "textarea"
 	FormFieldSelect        FormFieldKind = "select"
 	FormFieldHidden        FormFieldKind = "hidden"
+	FormFieldPassword      FormFieldKind = "password"
 )
 
 type FormOptions struct {
@@ -91,6 +92,14 @@ func FormField(label string, name string, opts FormOptions, children ...htm.Frag
 			htm.Attr("name", name),
 			fieldId,
 			htm.Attr("value", opts.Value.(string)),
+		)
+	case FormFieldPassword:
+		input = htm.NewHtmlFragment("input",
+			htm.Attr("type", "password"),
+			htm.Attr("name", name),
+			fieldId,
+			htm.Attr("value", opts.Value.(string)),
+			htm.Attr("placeholder", opts.Placeholder),
 		)
 	default:
 		input = htm.NewHtmlFragment("input",

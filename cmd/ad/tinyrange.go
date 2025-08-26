@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/tinyrange/ad/pkg/common"
 	"golang.org/x/crypto/ssh"
@@ -31,9 +37,9 @@ type SecureSSHConfig struct {
 type TinyRangeInstance interface {
 	FlowInstance
 
-	SecureConfig() (SecureSSHConfig, error)
+	SecureConfig() SecureSSHConfig
 
-	Start(templateName string, wg WireguardInstance, secureSSHPath string) error
+	Start(templateName string, wg WireguardInstance) error
 	Stop() error
 
 	RunCommand(ctx context.Context, command string) (string, error)
@@ -49,19 +55,17 @@ type TinyRangeInstance interface {
 }
 
 type tinyRangeInstance struct {
-	mtx             sync.Mutex
-	game            *AttackDefenseGame
-	wg              WireguardInstance
-	config          InstanceConfig
-	cmd             *exec.Cmd
-	name            string
-	secureSSHPath   string
-	secureConfig    SecureSSHConfig
-	sshClientConfig *ssh.ClientConfig
-	address         net.IP
-	services        []FlowService
-	flows           []ParsedFlow
-	tags            TagList
+	mtx          sync.Mutex
+	game         *AttackDefenseGame
+	wg           WireguardInstance
+	config       InstanceConfig
+	cmd          *exec.Cmd
+	name         string
+	secureConfig SecureSSHConfig
+	address      net.IP
+	services     []FlowService
+	flows        []ParsedFlow
+	tags         TagList
 }
 
 func (t *tinyRangeInstance) String() string {
@@ -136,80 +140,62 @@ func (t *tinyRangeInstance) Tags() TagList {
 	return t.tags
 }
 
-func (t *tinyRangeInstance) SecureConfig() (SecureSSHConfig, error) {
-	if _, err := t.clientConfig(); err != nil {
-		return SecureSSHConfig{}, err
-	}
-
-	return t.secureConfig, nil
+func (t *tinyRangeInstance) SecureConfig() SecureSSHConfig {
+	return t.secureConfig
 }
 
 func (t *tinyRangeInstance) clientConfig() (*ssh.ClientConfig, error) {
 	t.mtx.Lock()
 	defer t.mtx.Unlock()
 
-	if t.sshClientConfig == nil {
-		if t.secureSSHPath == "" {
-			return nil, errors.New("secure ssh path not set")
-		}
-
-		// Wait for the secure SSH path to be created.
-		for {
-			if _, err := os.Stat(t.secureSSHPath); err == nil {
-				break
-			}
-
-			time.Sleep(50 * time.Millisecond)
-		}
-
-		// Load the secure SSH config.
-
-		f, err := os.Open(t.secureSSHPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open secure ssh config: %w", err)
-		}
-		defer f.Close()
-
-		if err := json.NewDecoder(f).Decode(&t.secureConfig); err != nil {
-			return nil, fmt.Errorf("failed to decode secure ssh config: %w", err)
-		}
-
-		hostKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(t.secureConfig.PublicKey))
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse host key: %w", err)
-		}
-
-		t.sshClientConfig = &ssh.ClientConfig{
-			User: "root",
-			Auth: []ssh.AuthMethod{
-				ssh.Password(t.secureConfig.Password),
-			},
-			HostKeyCallback: ssh.FixedHostKey(hostKey),
-		}
-
-		slog.Info("created ssh client config", "instance", t.Hostname())
+	hostKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(t.secureConfig.PublicKey))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse host key: %w", err)
 	}
 
-	return t.sshClientConfig, nil
+	return &ssh.ClientConfig{
+		User: "root",
+		Auth: []ssh.AuthMethod{
+			ssh.Password(t.secureConfig.Password),
+		},
+		HostKeyCallback: ssh.FixedHostKey(hostKey),
+	}, nil
 }
 
 func (t *tinyRangeInstance) Hostname() string {
 	return t.name
 }
 
-func (t *tinyRangeInstance) Start(templateName string, wg WireguardInstance, secureSSHPath string) error {
+func (t *tinyRangeInstance) Start(templateName string, wg WireguardInstance) error {
 	// Load the template.
 	template, ok := t.game.getCachedTemplate(templateName)
 	if !ok {
 		return fmt.Errorf("template %s not found", templateName)
 	}
 
+	secureSSHPath, err := ioutil.TempFile("", "sshconfig")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file for ssh config: %v", err)
+	}
+
+	sshConfigBytes, err := json.Marshal(t.secureConfig)
+	if err != nil {
+		return fmt.Errorf("failed to serialize ssh config: %v", err)
+	}
+
+	_, err = secureSSHPath.Write(sshConfigBytes)
+	if err != nil {
+		return fmt.Errorf("failed to write ssh config to temp file: %v", err)
+	}
+
 	args := []string{
 		t.game.TinyRangeVMMPath,
 		"-wireguard-url", wg.ConfigUrl(),
-		"-secure-ssh", secureSSHPath,
+		"-secure-ssh", secureSSHPath.Name(),
 		"-persist-path", "persist",
 	}
+
+	secureSSHPath.Close()
 
 	if *verbose {
 		args = append(args, "-verbose")
@@ -227,10 +213,41 @@ func (t *tinyRangeInstance) Start(templateName string, wg WireguardInstance, sec
 	}
 
 	t.cmd = cmd
-	t.secureSSHPath = secureSSHPath
 	t.wg = wg
 
 	return nil
+}
+
+func generateSSHConfig() (SecureSSHConfig, error) {
+	var secureSSH SecureSSHConfig
+	secureSSH.Password = uuid.NewString()
+
+	// Generate a new host key.
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return SecureSSHConfig{}, fmt.Errorf("ssh: failed to generate key: %v", err)
+	}
+
+	block, err := ssh.MarshalPrivateKey(privateKey, "")
+	if err != nil {
+		return SecureSSHConfig{}, fmt.Errorf("ssh: failed to marshal private key: %v", err)
+	}
+
+	blockBytes := pem.EncodeToMemory(block)
+	if blockBytes == nil {
+		return SecureSSHConfig{}, fmt.Errorf("ssh: failed to encode private key")
+	}
+
+	secureSSH.HostKey = string(blockBytes)
+
+	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return SecureSSHConfig{}, fmt.Errorf("ssh: failed to generate public key: %v", err)
+	}
+
+	secureSSH.PublicKey = string(ssh.MarshalAuthorizedKey(publicKey))
+
+	return secureSSH, nil
 }
 
 func (t *tinyRangeInstance) RunCommand(ctx context.Context, command string) (string, error) {
@@ -500,11 +517,16 @@ func (t *tinyRangeInstance) Stop() error {
 	return nil
 }
 
-func NewTinyRangeInstance(game *AttackDefenseGame, name string, ip net.IP, config InstanceConfig) TinyRangeInstance {
-	return &tinyRangeInstance{
-		game:    game,
-		name:    name,
-		address: ip,
-		config:  config,
+func NewTinyRangeInstance(game *AttackDefenseGame, name string, ip net.IP, config InstanceConfig) (TinyRangeInstance, error) {
+	sshConfig, err := generateSSHConfig()
+	if err != nil {
+		return &tinyRangeInstance{}, fmt.Errorf("Failed to generate SSH config: %v", err)
 	}
+	return &tinyRangeInstance{
+		game:         game,
+		name:         name,
+		address:      ip,
+		config:       config,
+		secureConfig: sshConfig,
+	}, nil
 }

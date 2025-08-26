@@ -42,7 +42,7 @@ var (
 	listenIp         = flag.String("listen-ip", "127.0.0.1", "The IP to listen on.")
 	externalIp       = flag.String("extern-ip", "", "The external IP of the server (can differ from -ip if using a proxy etc).")
 	publicPort       = flag.Int("port", 5100, "The public port of the server.")
-	persistancePath  = flag.String("persist-path", "local/persist", "The path to the config file.")
+	persistancePath  = flag.String("persist-path", "local/persist", "The directory to persist game data to")
 	routerMTU        = flag.Int("router-mtu", 1420, "The MTU of the router.")
 )
 
@@ -79,6 +79,7 @@ func appMain() error {
 	configName := strings.TrimSuffix(filepath.Base(*configFile), filepath.Ext(*configFile))
 
 	persistDir := filepath.Join(*persistancePath, configName)
+	dbFile := filepath.Join(persistDir, "persist.db")
 
 	slog.Info("persisting to", "dir", persistDir)
 
@@ -102,8 +103,13 @@ func appMain() error {
 		externalIp = listenIp
 	}
 
+	db, err := CreateDatabaseConnection(dbFile)
+	if err != nil {
+		return err
+	}
+
 	game := &AttackDefenseGame{
-		Persist:            NewPersistDatabase(persistDir),
+		Persist:            db,
 		Config:             config,
 		Events:             make(map[string]*Event),
 		tinyRangeTemplates: make(map[string]string),

@@ -16,7 +16,7 @@ import (
 	"github.com/tinyrange/wireguard"
 )
 
-func generateRandomString(length int) (string, error) {
+func GenerateRandomString(length int) (string, error) {
 	b := make([]byte, length)
 
 	if _, err := rand.Read(b); err != nil {
@@ -63,8 +63,8 @@ var (
 
 type WireguardRouter interface {
 	AddEndpoint(handler NetHandler, internalIp string) (WireguardInstance, error)
-	AddDevice(name string, handler NetHandler) (inst WireguardInstance, config string, err error)
-	RestoreDevice(name string, config string, handler NetHandler) (WireguardInstance, error)
+	AddDevice(handler NetHandler) (inst WireguardInstance, config string, err error)
+	RestoreDevice(config string, handler NetHandler) (WireguardInstance, error)
 
 	RegisterMux(mux *http.ServeMux)
 }
@@ -218,7 +218,7 @@ Endpoint = %s:%s
 	return config, nil
 }
 
-func (r *wireguardRouter) AddDevice(name string, handler NetHandler) (inst WireguardInstance, config string, err error) {
+func (r *wireguardRouter) AddDevice(handler NetHandler) (inst WireguardInstance, config string, err error) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
@@ -276,7 +276,7 @@ func filterConfigToKeys(config string, keys []string) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-func (r *wireguardRouter) RestoreDevice(name string, config string, handler NetHandler) (WireguardInstance, error) {
+func (r *wireguardRouter) RestoreDevice(config string, handler NetHandler) (WireguardInstance, error) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
@@ -305,7 +305,7 @@ func (r *wireguardRouter) RestoreDevice(name string, config string, handler NetH
 }
 
 func NewWireguardRouter(listenAddress string, externalAddress string, mtu int, serverUrl string) (WireguardRouter, error) {
-	salt, err := generateRandomString(8)
+	salt, err := GenerateRandomString(8)
 	if err != nil {
 		return nil, err
 	}

@@ -3,3 +3,4 @@ local/
 venv/
 *.db
 __pycache__
+/ad

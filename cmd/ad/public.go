@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/gomarkdown/markdown"
 	htmlMd "github.com/gomarkdown/markdown/html"
@@ -217,6 +218,12 @@ func (game *AttackDefenseGame) publicPageLayout(title string, body ...htm.Fragme
 	)
 }
 
+func (game *AttackDefenseGame) renderError(w http.ResponseWriter, r *http.Request, err error) {
+	if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
+		slog.Error("failed to render page", "err", err)
+	}
+}
+
 func (game *AttackDefenseGame) startPublicServer() error {
 	handler := http.NewServeMux()
 
@@ -258,6 +265,28 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		}
 
 		page := game.publicPageLayout("Instances", instanceList...)
+
+		if err := htm.Render(r.Context(), w, page); err != nil {
+			slog.Error("failed to render page", "err", err)
+		}
+	})
+
+	// GET /teams lists all teams.
+	handler.HandleFunc("GET /teams", func(w http.ResponseWriter, r *http.Request) {
+		isAdmin := game.checkForAdmin(w, r)
+
+		var teamList []htm.Fragment
+		for _, team := range game.Teams {
+			var lines []htm.Fragment
+			lines = append(lines, bootstrap.CardTitle(team.DisplayName))
+			lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("IP: %s", team.IP())))
+			if isAdmin {
+				lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("Join token: %s", team.JoinToken)))
+			}
+			teamList = append(teamList, html.Div(bootstrap.Card(lines...)))
+		}
+
+		page := game.publicPageLayout("Teams", teamList...)
 
 		if err := htm.Render(r.Context(), w, page); err != nil {
 			slog.Error("failed to render page", "err", err)
@@ -426,32 +455,204 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		}
 
 		name := r.FormValue("name")
-
 		if name == "" {
-			if err := htm.Render(r.Context(), w, game.publicPageError(fmt.Errorf("name is required"))); err != nil {
-				slog.Error("failed to render page", "err", err)
-			}
+			game.renderError(w, r, fmt.Errorf("name is required"))
 			return
 		}
 
-		team := r.FormValue("team")
-
-		if team == "" {
-			if err := htm.Render(r.Context(), w, game.publicPageError(fmt.Errorf("team is required"))); err != nil {
-				slog.Error("failed to render page", "err", err)
-			}
+		userIDStr := r.FormValue("userID")
+		if userIDStr == "" {
+			game.renderError(w, r, fmt.Errorf("userID is required"))
 			return
 		}
 
-		if err := game.AddDevice(name, team); err != nil {
+		userID, err := strconv.Atoi(userIDStr)
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("userID must be an integer"))
+			return
+		}
+
+		if err := game.AddDevice(name, userID); err != nil {
 			slog.Error("failed to add device", "err", err)
-			if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
-				slog.Error("failed to render page", "err", err)
-			}
+			game.renderError(w, r, err)
 			return
 		}
 
 		http.Redirect(w, r, "/devices", http.StatusFound)
+	})
+
+	handler.HandleFunc("GET /register", func(w http.ResponseWriter, r *http.Request) {
+		page := game.publicPageLayout("Register",
+			html.Form(
+				html.FormTarget("POST", "/register"),
+				bootstrap.FormField("Team token", "teamToken", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Team token"}),
+				bootstrap.FormField("Username", "username", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Username"}),
+				bootstrap.FormField("Password", "password", html.FormOptions{Kind: html.FormFieldPassword, Required: true, Value: "", Placeholder: "Password"}),
+				bootstrap.SubmitButton("Register", bootstrap.ButtonColorPrimary),
+			),
+		)
+
+		if err := htm.Render(r.Context(), w, page); err != nil {
+			slog.Error("failed to render page", "err", err)
+		}
+	})
+
+	// POST /register adds a new user.
+	handler.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) {
+		teamToken := r.FormValue("teamToken")
+		if teamToken == "" {
+			game.renderError(w, r, fmt.Errorf("teamToken is required"))
+			return
+		}
+
+		username := r.FormValue("username")
+		if username == "" {
+			game.renderError(w, r, fmt.Errorf("username is required"))
+			return
+		}
+
+		password := r.FormValue("password")
+		if password == "" {
+			game.renderError(w, r, fmt.Errorf("password is required"))
+			return
+		}
+
+		teamID := -1
+		for _, team := range game.Teams {
+			if team.JoinToken == teamToken {
+				teamID = team.ID
+			}
+		}
+
+		if teamID == -1 {
+			game.renderError(w, r, fmt.Errorf("invalid team token"))
+			return
+		}
+
+		_, err := game.Persist.GetUserByUsername(username)
+		if err == nil {
+			game.renderError(w, r, fmt.Errorf("username taken"))
+			return
+		}
+
+		passwordHash, err := HashPassword(password)
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("failed to hash password: %v", err))
+			return
+		}
+
+		user := User{
+			TeamID:       teamID,
+			Username:     username,
+			PasswordHash: passwordHash,
+		}
+		_, err = game.Persist.InsertUser(&user)
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("failed to insert user: %v", err))
+			return
+		}
+
+		http.Redirect(w, r, "/login", http.StatusFound)
+	})
+
+	handler.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
+		page := game.publicPageLayout("Log in",
+			html.Form(
+				html.FormTarget("POST", "/login"),
+				bootstrap.FormField("Username", "username", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Username"}),
+				bootstrap.FormField("Password", "password", html.FormOptions{Kind: html.FormFieldPassword, Required: true, Value: "", Placeholder: "Password"}),
+				bootstrap.SubmitButton("Log in", bootstrap.ButtonColorPrimary),
+			),
+		)
+
+		if err := htm.Render(r.Context(), w, page); err != nil {
+			slog.Error("failed to render page", "err", err)
+		}
+	})
+
+	// POST /login logs in a user.
+	handler.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
+		username := r.FormValue("username")
+		if username == "" {
+			game.renderError(w, r, fmt.Errorf("username is required"))
+			return
+		}
+
+		password := r.FormValue("password")
+		if password == "" {
+			game.renderError(w, r, fmt.Errorf("password is required"))
+			return
+		}
+
+		user, err := game.Persist.GetUserByUsername(username)
+		if err != nil || !user.VerifyPassword(password) {
+			game.renderError(w, r, fmt.Errorf("incorrect username or password"))
+			return
+		}
+
+		token, err := GenerateRandomString(64)
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("failed to generate session token"))
+			return
+		}
+
+		session := Session{
+			Token:     token,
+			UserID:    user.ID,
+			ExpiresAt: time.Now().Add(SessionValidDuration),
+		}
+		_, err = game.Persist.InsertSession(&session)
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("failed to create session: %v", err))
+		}
+
+		cookie := http.Cookie{Name: "session", Value: session.Token, Expires: session.ExpiresAt}
+		http.SetCookie(w, &cookie)
+
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
+
+	handler.HandleFunc("GET /profile", func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("session")
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("unauthorized"))
+			return
+		}
+
+		session, err := game.Persist.GetSessionByToken(cookie.Value)
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("unauthorized"))
+			return
+		}
+
+		user, err := game.Persist.GetUser(session.UserID)
+		if err != nil {
+			game.renderError(w, r, fmt.Errorf("failed to get user by id"))
+			return
+		}
+
+		var team *Team
+		for _, candidateTeam := range game.Teams {
+			if candidateTeam.ID == user.TeamID {
+				team = candidateTeam
+			}
+		}
+
+		if team == nil {
+			game.renderError(w, r, fmt.Errorf("failed to get team by id"))
+			return
+		}
+
+		page := game.publicPageLayout("Profile",
+			html.Div(
+				html.Div(html.Textf("Username: %s", user.Username)),
+				html.Div(html.Textf("Team: %s", team.DisplayName)),
+			),
+		)
+
+		if err := htm.Render(r.Context(), w, page); err != nil {
+			slog.Error("failed to render page", "err", err)
+		}
 	})
 
 	// // DELETE /api/device/{ip} deletes a device.

@@ -22,10 +22,18 @@ type TargetInfo struct {
 type Team struct {
 	ID          int
 	DisplayName string
+	JoinToken   string
 
 	teamInstance TinyRangeInstance
 	socInstance  TinyRangeInstance
 	botInstance  TinyRangeInstance
+}
+
+type Instance struct {
+	ID        int
+	TeamID    int
+	Name      string
+	sshConfig string
 }
 
 func (t *Team) BotId() int { return t.ID + BOT_ID_OFFSET }
@@ -37,7 +45,7 @@ func (t *Team) GetSSHConfig() (SecureSSHConfig, error) {
 		return SecureSSHConfig{}, fmt.Errorf("team instance not set")
 	}
 
-	return t.teamInstance.SecureConfig()
+	return t.teamInstance.SecureConfig(), nil
 }
 
 func (t *Team) IP() string {

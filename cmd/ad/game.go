@@ -373,7 +373,10 @@ func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, c
 	}
 
 	// Start the instance.
-	inst := NewTinyRangeInstance(game, name, net.ParseIP(ip), config)
+	inst, err := NewTinyRangeInstance(game, name, net.ParseIP(ip), config)
+	if err != nil {
+		return nil, err
+	}
 
 	slog.Info("starting instance", "template", config.Template, "instance", inst, "name", name)
 
@@ -389,12 +392,11 @@ func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, c
 		return nil, err
 	}
 
-	secureSSHPath, err := game.Persist.EnsurePath("ssh", name)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := inst.Start(config.Template, wg, secureSSHPath); err != nil {
+	if err := inst.Start(config.Template, wg); err != nil {
 		return nil, err
 	}
 
@@ -420,11 +422,17 @@ func (game *AttackDefenseGame) FlagValidTicks() int64 {
 	return game.Config.FlagValidTime.Nanoseconds() / game.Config.TickRate.Nanoseconds()
 }
 
-func (game *AttackDefenseGame) AddTeam(name string) {
+func (game *AttackDefenseGame) AddTeam(name string) error {
+	joinToken, err := GenerateRandomString(32)
+	if err != nil {
+		return err
+	}
 	game.Teams = append(game.Teams, &Team{
 		ID:          len(game.Teams),
 		DisplayName: name,
+		JoinToken:   joinToken,
 	})
+	return nil
 }
 
 func (game *AttackDefenseGame) AddEvent(name string, run EventCallback) {
@@ -488,7 +496,7 @@ func (game *AttackDefenseGame) ForAllTeams(includeBots bool, background bool, f 
 		close(errChan)
 
 		if len(errChan) > 0 {
-			return fmt.Errorf("failed to run function for all teams")
+			return fmt.Errorf("failed to run function for each team")
 		}
 
 		return nil
@@ -948,13 +956,9 @@ func (game *AttackDefenseGame) Run() error {
 	})
 
 	// Load all existing device configurations.
-	if err := game.Persist.ForEach("devices", func(key string, read func(value interface{}) error) error {
-		var device DeviceConfig
-		if err := read(&device); err != nil {
-			return err
-		}
-
-		dev, err := game.createDevice(key, device.ID, device.Team)
+	if err := game.Persist.ForEachDevice(func(device DeviceConfig) error {
+		dev, err := game.createDevice(device)
+		dev.id = device.ID
 		if err != nil {
 			return fmt.Errorf("failed to add device: %w", err)
 		}
@@ -964,7 +968,11 @@ func (game *AttackDefenseGame) Run() error {
 			return fmt.Errorf("failed to add device to flow router: %w", err)
 		}
 
-		wg, err := game.Router.RestoreDevice(key, device.Config, handler)
+		if device.Config == nil {
+			return fmt.Errorf("device missing wireguard config string: id=%d, name=%q", device.ID, device.Name)
+		}
+
+		wg, err := game.Router.RestoreDevice(*device.Config, handler)
 		if err != nil {
 			return err
 		}
@@ -1060,36 +1068,36 @@ outer:
 	return nil
 }
 
-func (game *AttackDefenseGame) createDevice(name string, id int, team string) (*Device, error) {
-	if id < 0 {
-		id = len(game.devices)
-	}
-
+func (game *AttackDefenseGame) createDevice(device DeviceConfig) (*Device, error) {
 	dev := &Device{
-		game: game,
-		name: name,
-		team: team,
-		id:   id,
-		ip:   net.IPv4(10, 40, 30, 1+byte(id)).String(),
+		game:   game,
+		id:     device.ID,
+		name:   device.Name,
+		userID: device.UserID,
 	}
 
 	if err := dev.ParseTags(); err != nil {
-		return nil, fmt.Errorf("failed to parse tags for device (%s): %w", name, err)
+		return nil, fmt.Errorf("failed to parse tags for device (%s): %w", device.Name, err)
 	}
 
 	if err := dev.ParseFlows(); err != nil {
-		return nil, fmt.Errorf("failed to parse flows for device (%s): %w", name, err)
+		return nil, fmt.Errorf("failed to parse flows for device (%s): %w", device.Name, err)
 	}
 
 	return dev, nil
 }
 
-func (game *AttackDefenseGame) AddDevice(name string, team string) error {
-	if _, err := game.Persist.ValidateKey(name); err != nil {
+func (game *AttackDefenseGame) AddDevice(name string, userID int) error {
+	device := &DeviceConfig{
+		UserID: userID,
+		Name:   name,
+	}
+	id, err := game.Persist.InsertDevice(device)
+	if err != nil {
 		return err
 	}
 
-	dev, err := game.createDevice(name, len(game.GetDevices()), team)
+	dev, err := game.createDevice(*device)
 	if err != nil {
 		return err
 	}
@@ -1099,21 +1107,17 @@ func (game *AttackDefenseGame) AddDevice(name string, team string) error {
 		return err
 	}
 
-	wg, deviceConfig, err := game.Router.AddDevice(name, handler)
+	wg, deviceConfig, err := game.Router.AddDevice(handler)
 	if err != nil {
+		return err
+	}
+
+	if err := game.Persist.UpdateDeviceConfig(id, &deviceConfig); err != nil {
 		return err
 	}
 
 	dev.wg = wg
 	game.devices = append(game.devices, dev)
-
-	if err := game.Persist.Set("devices", name, &DeviceConfig{
-		ID:     dev.id,
-		Config: deviceConfig,
-		Team:   team,
-	}); err != nil {
-		return err
-	}
 
 	slog.Info("added device", "name", name, "hostname", dev.Hostname())
 

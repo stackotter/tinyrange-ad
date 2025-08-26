@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"net"
+	"strconv"
 )
 
 type DeviceConfig struct {
-	Config string
 	ID     int
-	Team   string
+	UserID int
+	Name   string
+	Config *string
 }
 
 type WireguardDevice struct {
@@ -18,31 +20,37 @@ type WireguardDevice struct {
 }
 
 type Device struct {
-	game  *AttackDefenseGame
-	wg    WireguardInstance
-	name  string
-	team  string
-	id    int
-	ip    string
-	flows []ParsedFlow
-	tags  TagList
+	game   *AttackDefenseGame
+	wg     WireguardInstance
+	name   string
+	userID int
+	id     int
+	ip     string
+	flows  []ParsedFlow
+	tags   TagList
 }
 
 // implements FlowInstance.
 func (d *Device) Flows() []ParsedFlow     { return d.flows }
 func (d *Device) Hostname() string        { return "device_" + d.name }
-func (d *Device) InstanceAddress() net.IP { return net.ParseIP(d.ip) }
+func (d *Device) InstanceAddress() net.IP { return net.IPv4(10, 40, 30, 1+byte(d.id)) }
 func (d *Device) Services() []FlowService { return []FlowService{} }
 func (d *Device) Tags() TagList           { return d.tags }
 
-func (d *Device) ParseTags() error {
-	tags, err := d.game.Config.Device.Tags.Parse(func(s string) (string, error) {
-		if s == "team" {
-			return d.team, nil
-		} else {
-			return "", fmt.Errorf("invalid tag variables: %s", s)
+func (d *Device) evaluateDeviceVariable(s string) (string, error) {
+	if s == "team" {
+		user, err := d.game.Persist.GetUser(d.userID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get team from user id: %v", err)
 		}
-	})
+		return strconv.Itoa(user.TeamID), nil
+	} else {
+		return "", fmt.Errorf("invalid variable variable: %s", s)
+	}
+}
+
+func (d *Device) ParseTags() error {
+	tags, err := d.game.Config.Device.Tags.Parse(d.evaluateDeviceVariable)
 
 	if err != nil {
 		return fmt.Errorf("failed to parse tags for device (%s): %w", d.name, err)
@@ -54,13 +62,7 @@ func (d *Device) ParseTags() error {
 }
 
 func (d *Device) ParseFlows() error {
-	flows, err := d.game.Config.Device.Flows.Parse(func(s string) (string, error) {
-		if s == "team" {
-			return d.team, nil
-		} else {
-			return "", fmt.Errorf("invalid flow variable: %s", s)
-		}
-	})
+	flows, err := d.game.Config.Device.Flows.Parse(d.evaluateDeviceVariable)
 	if err != nil {
 		return fmt.Errorf("failed to parse flows for device (%s): %w", d.name, err)
 	}
