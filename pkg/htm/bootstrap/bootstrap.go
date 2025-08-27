@@ -166,6 +166,17 @@ func FormField(label string, name string, opts html.FormOptions, children ...htm
 			options,
 			htm.Group(children),
 		)
+	case html.FormFieldPassword:
+		input = htm.NewHtmlFragment("input",
+			htm.Attr("type", "password"),
+			htm.Attr("name", name),
+			htm.Class("form-control"),
+			fieldId,
+			htm.Attr("value", opts.Value.(string)),
+			htm.Attr("placeholder", opts.Placeholder),
+			requiredFrag,
+			htm.Group(children),
+		)
 	default:
 		input = htm.NewHtmlFragment("input",
 			htm.Attr("type", "input"),

@@ -44,6 +44,8 @@ var (
 	publicPort       = flag.Int("port", 5100, "The public port of the server.")
 	persistancePath  = flag.String("persist-path", "local/persist", "The directory to persist game data to")
 	routerMTU        = flag.Int("router-mtu", 1420, "The MTU of the router.")
+	noInstances      = flag.Bool("no-instances", false, "Disables game instances and just runs the website and VPN.")
+	adminUsername    = flag.String("admin-username", "", "The admin username. Expects an account to already exist (or to get created) with the given username.")
 )
 
 func appMain() error {
@@ -159,6 +161,14 @@ func appMain() error {
 
 	if *waitAfter {
 		game.Config.WaitAfter = true
+	}
+
+	if *noInstances {
+		game.NoInstances = true
+	}
+
+	if *adminUsername != "" {
+		game.AdminUsername = adminUsername
 	}
 
 	for _, team := range nopTeam {

@@ -24,19 +24,38 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func (game *AttackDefenseGame) isAdmin(r *http.Request) bool {
-	return true
-}
-
-func (game *AttackDefenseGame) checkForAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if !game.isAdmin(r) {
-		slog.Warn("attempted to access admin page without permission", "ip", r.RemoteAddr, "path", r.URL.Path)
-
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return false
+func (game *AttackDefenseGame) requireAuthentication(w http.ResponseWriter, r *http.Request) (User, Team, error) {
+	cookie, err := r.Cookie("session")
+	if err != nil {
+		return User{}, Team{}, fmt.Errorf("unauthorized")
 	}
 
-	return true
+	session, err := game.Persist.GetSessionByToken(cookie.Value)
+	if err != nil {
+		return User{}, Team{}, fmt.Errorf("unauthorized")
+	}
+
+	user, err := game.Persist.GetUser(session.UserID)
+	if err != nil {
+		return User{}, Team{}, fmt.Errorf("failed to get user by id")
+	}
+
+	var team *Team
+	for _, candidateTeam := range game.Teams {
+		if candidateTeam.ID == user.TeamID {
+			team = candidateTeam
+		}
+	}
+
+	if team == nil {
+		return User{}, Team{}, fmt.Errorf("failed to get team by id")
+	}
+
+	return user, *team, nil
+}
+
+func (game *AttackDefenseGame) isAdmin(user User) bool {
+	return game.AdminUsername != nil && user.Username == *game.AdminUsername
 }
 
 func (game *AttackDefenseGame) renderScoreboard() htm.Fragment {
@@ -188,11 +207,38 @@ func (game *AttackDefenseGame) renderPage(ctx context.Context, path string) (htm
 
 var upgrader = websocket.Upgrader{}
 
-func (game *AttackDefenseGame) publicPageError(err error) htm.Fragment {
-	return game.publicPageLayout("Error", bootstrap.Alert(bootstrap.AlertColorDanger, htm.Text(err.Error())))
+func (game *AttackDefenseGame) publicPageError(err error, user *User) htm.Fragment {
+	return game.publicPageLayout("Error", user, bootstrap.Alert(bootstrap.AlertColorDanger, htm.Text(err.Error())))
 }
 
-func (game *AttackDefenseGame) publicPageLayout(title string, body ...htm.Fragment) htm.Fragment {
+func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body ...htm.Fragment) htm.Fragment {
+	var navitems []htm.Fragment
+	navitems = append(navitems,
+		bootstrap.NavbarLink("/scoreboard", html.Text("Scoreboard")),
+	)
+
+	if user != nil && game.isAdmin(*user) {
+		navitems = append(navitems,
+			bootstrap.NavbarLink("/instances", html.Text("Instances")),
+			bootstrap.NavbarLink("/events", html.Text("Events")),
+			bootstrap.NavbarLink("/devices", html.Text("Devices")),
+			bootstrap.NavbarLink("/config", html.Text("Config")),
+			bootstrap.NavbarLink("/teams", html.Text("Teams")),
+		)
+	}
+
+	if user == nil {
+		navitems = append(navitems,
+			bootstrap.NavbarLink("/register", html.Text("Register")),
+			bootstrap.NavbarLink("/login", html.Text("Log in")),
+		)
+	} else {
+		navitems = append(navitems,
+			bootstrap.NavbarLink("/profile", html.Text("Profile")),
+			bootstrap.NavbarLink("/logout", html.Text("Log out")),
+		)
+	}
+
 	return html.Html(
 		htm.Attr("lang", "en"),
 		html.Head(
@@ -207,49 +253,83 @@ func (game *AttackDefenseGame) publicPageLayout(title string, body ...htm.Fragme
 		html.Body(
 			bootstrap.Navbar(
 				bootstrap.NavbarBrand("/", html.Text(game.Config.Title)),
-				bootstrap.NavbarLink("/scoreboard", html.Text("Scoreboard")),
-				bootstrap.NavbarLink("/instances", html.Text("Instances")),
-				bootstrap.NavbarLink("/events", html.Text("Events")),
-				bootstrap.NavbarLink("/devices", html.Text("Devices")),
-				bootstrap.NavbarLink("/config", html.Text("Config")),
+				navitems...,
 			),
 			html.Div(bootstrap.Container, htm.Group(body)),
 		),
 	)
 }
 
-func (game *AttackDefenseGame) renderError(w http.ResponseWriter, r *http.Request, err error) {
-	if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
+func (game *AttackDefenseGame) renderError(w http.ResponseWriter, r *http.Request, err error, user *User) {
+	if err := htm.Render(r.Context(), w, game.publicPageError(err, user)); err != nil {
 		slog.Error("failed to render page", "err", err)
 	}
+}
+
+func (game *AttackDefenseGame) route(
+	handler func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error,
+) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, team, err := game.requireAuthentication(w, r)
+		userPtr := &user
+		teamPtr := &team
+		if err != nil {
+			userPtr = nil
+			teamPtr = nil
+		}
+		err = handler(w, r, userPtr, teamPtr)
+		if err != nil {
+			game.renderError(w, r, err, userPtr)
+		}
+	}
+}
+
+func (game *AttackDefenseGame) authenticatedRoute(
+	handler func(w http.ResponseWriter, r *http.Request, user User, team Team) error,
+) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, team, err := game.requireAuthentication(w, r)
+		if err != nil {
+			game.renderError(w, r, err, nil)
+			return
+		}
+		err = handler(w, r, user, team)
+		if err != nil {
+			game.renderError(w, r, err, &user)
+		}
+	}
+}
+
+func (game *AttackDefenseGame) adminRoute(
+	handler func(w http.ResponseWriter, r *http.Request, user User, team Team) error,
+) func(w http.ResponseWriter, r *http.Request) {
+	return game.authenticatedRoute(
+		func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+			if !game.isAdmin(user) {
+				return fmt.Errorf("unauthorized")
+			}
+			return handler(w, r, user, team)
+		},
+	)
 }
 
 func (game *AttackDefenseGame) startPublicServer() error {
 	handler := http.NewServeMux()
 
-	handler.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("/", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
 		body, err := game.renderPage(r.Context(), "/")
 		if err != nil {
-			slog.Error("failed to render page", "err", err)
-			if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
-				slog.Error("failed to render page", "err", err)
-			}
-			return
+			return err
 		}
 
-		page := game.publicPageLayout("Home", body)
+		page := game.publicPageLayout("Home", user, body)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err = htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// GET /instances lists all running TinyRange instances and provides a button to SSH via WebSSH.
-	handler.HandleFunc("GET /instances", func(w http.ResponseWriter, r *http.Request) {
-		if !game.checkForAdmin(w, r) {
-			return
-		}
-
+	handler.HandleFunc("GET /instances", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		instances := game.getInstances()
 
 		var instanceList []htm.Fragment
@@ -264,16 +344,15 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			))
 		}
 
-		page := game.publicPageLayout("Instances", instanceList...)
+		page := game.publicPageLayout("Instances", &user, instanceList...)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// GET /teams lists all teams.
-	handler.HandleFunc("GET /teams", func(w http.ResponseWriter, r *http.Request) {
-		isAdmin := game.checkForAdmin(w, r)
+	handler.HandleFunc("GET /teams", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		isAdmin := game.isAdmin(user)
 
 		var teamList []htm.Fragment
 		for _, team := range game.Teams {
@@ -286,30 +365,23 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			teamList = append(teamList, html.Div(bootstrap.Card(lines...)))
 		}
 
-		page := game.publicPageLayout("Teams", teamList...)
+		page := game.publicPageLayout("Teams", &user, teamList...)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// GET /connect/{instance} provides a WebSSH terminal to the instance.
-	handler.HandleFunc("GET /connect/{instance}", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("GET /connect/{instance}", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		// TODO(joshua): Allow teams to connect to their own instances.
-		if !game.checkForAdmin(w, r) {
-			return
-		}
 
 		instanceId := r.PathValue("instance")
 
 		if _, err := game.instanceFromName(instanceId); err != nil {
-			if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
-				slog.Error("failed to render page", "err", err)
-			}
-			return
+			return err
 		}
 
-		page := game.publicPageLayout("Connect",
+		page := game.publicPageLayout("Connect", &user,
 			htm.Group{
 				xtermjs.XTERM_CSS,
 				xtermjs.XTERM_JS,
@@ -321,43 +393,36 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			},
 		)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// /api/connect/{instance} provides a WebSocket connection to the instance.
-	handler.HandleFunc("/api/connect/{instance}", func(w http.ResponseWriter, r *http.Request) {
-		if !game.checkForAdmin(w, r) {
-			return
-		}
-
+	handler.HandleFunc("/api/connect/{instance}", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		instanceName := r.PathValue("instance")
 
 		instance, err := game.instanceFromName(instanceName)
 		if err != nil {
 			slog.Error("failed to get instance", "err", err)
 			http.Error(w, "instance not found", http.StatusNotFound)
-			return
+			return nil
 		}
 
 		// Upgrade the connection to a WebSocket.
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			slog.Error("failed to upgrade connection", "err", err)
-			return
+			return nil
 		}
 
 		if err := instance.WebSSHHandler(conn); err != nil {
 			slog.Error("failed to handle WebSSH", "err", err)
 		}
-	})
 
-	handler.HandleFunc("GET /events", func(w http.ResponseWriter, r *http.Request) {
-		if !game.checkForAdmin(w, r) {
-			return
-		}
+		return nil
+	}))
 
+	handler.HandleFunc("GET /events", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		events := game.GetEvents()
 
 		var eventList []htm.Fragment
@@ -375,39 +440,28 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			))
 		}
 
-		page := game.publicPageLayout("Events", eventList...)
+		page := game.publicPageLayout("Events", &user, eventList...)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// POST /event runs an event by name.
-	handler.HandleFunc("POST /api/event", func(w http.ResponseWriter, r *http.Request) {
-		if !game.checkForAdmin(w, r) {
-			return
-		}
-
+	handler.HandleFunc("POST /api/event", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		name := r.FormValue("name")
 
 		if err := game.RunEvent(r.Context(), name); err != nil {
 			slog.Error("failed to run event", "err", err)
-			if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
-				slog.Error("failed to render page", "err", err)
-			}
-			return
+			return err
 		}
 
 		http.Redirect(w, r, "/", http.StatusFound)
-	})
+		return nil
+	}))
 
 	// GET /devices lists all devices and their WireGuard configuration and a button to add a new device.
-	handler.HandleFunc("GET /devices", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("GET /devices", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		// TODO(joshua): Allow teams to add their own instances.
-		if !game.checkForAdmin(w, r) {
-			return
-		}
-
 		devices := game.GetDevices()
 
 		var deviceList []htm.Fragment
@@ -433,7 +487,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			teamNames = append(teamNames, team.DisplayName)
 		}
 
-		page := game.publicPageLayout("Devices",
+		page := game.publicPageLayout("Devices", &user,
 			htm.Group(deviceList),
 			html.Form(
 				html.FormTarget("POST", "/api/device"),
@@ -443,46 +497,44 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			),
 		)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// POST /api/device adds a new device.
-	handler.HandleFunc("POST /api/device", func(w http.ResponseWriter, r *http.Request) {
-		if !game.checkForAdmin(w, r) {
-			return
-		}
-
+	handler.HandleFunc("POST /api/device", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		name := r.FormValue("name")
 		if name == "" {
-			game.renderError(w, r, fmt.Errorf("name is required"))
-			return
+			return fmt.Errorf("name is required")
 		}
 
 		userIDStr := r.FormValue("userID")
 		if userIDStr == "" {
-			game.renderError(w, r, fmt.Errorf("userID is required"))
-			return
+			return fmt.Errorf("userID is required")
 		}
 
 		userID, err := strconv.Atoi(userIDStr)
 		if err != nil {
-			game.renderError(w, r, fmt.Errorf("userID must be an integer"))
-			return
+			return fmt.Errorf("userID must be an integer")
 		}
 
 		if err := game.AddDevice(name, userID); err != nil {
 			slog.Error("failed to add device", "err", err)
-			game.renderError(w, r, err)
-			return
+			return err
 		}
 
 		http.Redirect(w, r, "/devices", http.StatusFound)
-	})
+		return nil
+	}))
 
-	handler.HandleFunc("GET /register", func(w http.ResponseWriter, r *http.Request) {
-		page := game.publicPageLayout("Register",
+	handler.HandleFunc("GET /register", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
+		if user != nil {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return nil
+		}
+
+		page := game.publicPageLayout("Register", user,
+			html.H1(html.Text("Register")),
 			html.Form(
 				html.FormTarget("POST", "/register"),
 				bootstrap.FormField("Team token", "teamToken", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Team token"}),
@@ -492,29 +544,30 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			),
 		)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// POST /register adds a new user.
-	handler.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("POST /register", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
+		if user != nil {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return nil
+		}
+
 		teamToken := r.FormValue("teamToken")
 		if teamToken == "" {
-			game.renderError(w, r, fmt.Errorf("teamToken is required"))
-			return
+			return fmt.Errorf("teamToken is required")
 		}
 
 		username := r.FormValue("username")
 		if username == "" {
-			game.renderError(w, r, fmt.Errorf("username is required"))
-			return
+			return fmt.Errorf("username is required")
 		}
 
 		password := r.FormValue("password")
 		if password == "" {
-			game.renderError(w, r, fmt.Errorf("password is required"))
-			return
+			return fmt.Errorf("password is required")
 		}
 
 		teamID := -1
@@ -525,38 +578,41 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		}
 
 		if teamID == -1 {
-			game.renderError(w, r, fmt.Errorf("invalid team token"))
-			return
+			return fmt.Errorf("invalid team token")
 		}
 
 		_, err := game.Persist.GetUserByUsername(username)
 		if err == nil {
-			game.renderError(w, r, fmt.Errorf("username taken"))
-			return
+			return fmt.Errorf("username taken")
 		}
 
 		passwordHash, err := HashPassword(password)
 		if err != nil {
-			game.renderError(w, r, fmt.Errorf("failed to hash password: %v", err))
-			return
+			return fmt.Errorf("failed to hash password: %v", err)
 		}
 
-		user := User{
+		newUser := User{
 			TeamID:       teamID,
 			Username:     username,
 			PasswordHash: passwordHash,
 		}
-		_, err = game.Persist.InsertUser(&user)
+		_, err = game.Persist.InsertUser(&newUser)
 		if err != nil {
-			game.renderError(w, r, fmt.Errorf("failed to insert user: %v", err))
-			return
+			return fmt.Errorf("failed to insert user: %v", err)
 		}
 
 		http.Redirect(w, r, "/login", http.StatusFound)
-	})
+		return nil
+	}))
 
-	handler.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
-		page := game.publicPageLayout("Log in",
+	handler.HandleFunc("GET /login", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
+		if user != nil {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return nil
+		}
+
+		page := game.publicPageLayout("Log in", user,
+			html.H1(html.Text("Log in")),
 			html.Form(
 				html.FormTarget("POST", "/login"),
 				bootstrap.FormField("Username", "username", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Username"}),
@@ -565,35 +621,56 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			),
 		)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
+
+	// TODO(stackotter): Protect against CSRF (in all applicable routes)
+	handler.HandleFunc("GET /logout", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
+		cookie, err := r.Cookie("session")
+		if err != nil {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return nil
 		}
-	})
+
+		err = game.Persist.DeleteSessionByToken(cookie.Value)
+		if err != nil {
+			slog.Error("failed to delete session by token", "err", err)
+			return fmt.Errorf("failed to delete session by token")
+		}
+
+		blankCookie := http.Cookie{Name: "session", Value: "", Expires: time.Unix(0, 0)}
+		http.SetCookie(w, &blankCookie)
+
+		http.Redirect(w, r, "/", http.StatusFound)
+		return nil
+	}))
 
 	// POST /login logs in a user.
-	handler.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("POST /login", game.route(func(w http.ResponseWriter, r *http.Request, sessionUser *User, team *Team) error {
+		if sessionUser != nil {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return nil
+		}
+
 		username := r.FormValue("username")
 		if username == "" {
-			game.renderError(w, r, fmt.Errorf("username is required"))
-			return
+			return fmt.Errorf("username is required")
 		}
 
 		password := r.FormValue("password")
 		if password == "" {
-			game.renderError(w, r, fmt.Errorf("password is required"))
-			return
+			return fmt.Errorf("password is required")
 		}
 
 		user, err := game.Persist.GetUserByUsername(username)
 		if err != nil || !user.VerifyPassword(password) {
-			game.renderError(w, r, fmt.Errorf("incorrect username or password"))
-			return
+			return fmt.Errorf("incorrect username or password")
 		}
 
 		token, err := GenerateRandomString(64)
 		if err != nil {
-			game.renderError(w, r, fmt.Errorf("failed to generate session token"))
-			return
+			return fmt.Errorf("failed to generate session token")
 		}
 
 		session := Session{
@@ -603,57 +680,27 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		}
 		_, err = game.Persist.InsertSession(&session)
 		if err != nil {
-			game.renderError(w, r, fmt.Errorf("failed to create session: %v", err))
+			return fmt.Errorf("failed to create session: %v", err)
 		}
 
 		cookie := http.Cookie{Name: "session", Value: session.Token, Expires: session.ExpiresAt}
 		http.SetCookie(w, &cookie)
 
 		http.Redirect(w, r, "/", http.StatusFound)
-	})
+		return nil
+	}))
 
-	handler.HandleFunc("GET /profile", func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("session")
-		if err != nil {
-			game.renderError(w, r, fmt.Errorf("unauthorized"))
-			return
-		}
-
-		session, err := game.Persist.GetSessionByToken(cookie.Value)
-		if err != nil {
-			game.renderError(w, r, fmt.Errorf("unauthorized"))
-			return
-		}
-
-		user, err := game.Persist.GetUser(session.UserID)
-		if err != nil {
-			game.renderError(w, r, fmt.Errorf("failed to get user by id"))
-			return
-		}
-
-		var team *Team
-		for _, candidateTeam := range game.Teams {
-			if candidateTeam.ID == user.TeamID {
-				team = candidateTeam
-			}
-		}
-
-		if team == nil {
-			game.renderError(w, r, fmt.Errorf("failed to get team by id"))
-			return
-		}
-
-		page := game.publicPageLayout("Profile",
+	handler.HandleFunc("GET /profile", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		page := game.publicPageLayout("Profile", &user,
 			html.Div(
 				html.Div(html.Textf("Username: %s", user.Username)),
 				html.Div(html.Textf("Team: %s", team.DisplayName)),
 			),
 		)
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// // DELETE /api/device/{ip} deletes a device.
 	// handler.HandleFunc("DELETE /api/device/{ip}", func(w http.ResponseWriter, r *http.Request) {
@@ -665,7 +712,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 	// 	if err := game.RemoveDevice(ip); err != nil {
 	// 		slog.Error("failed to remove device", "err", err)
-	// 		if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
+	// 		if err := htm.Render(r.Context(), w, game.publicPageError(err, user)); err != nil {
 	// 			slog.Error("failed to render page", "err", err)
 	// 		}
 	// 		return
@@ -675,72 +722,67 @@ func (game *AttackDefenseGame) startPublicServer() error {
 	// })
 
 	// GET /config lists the current YAML configuration and provides a button to download it.
-	handler.HandleFunc("GET /config", func(w http.ResponseWriter, r *http.Request) {
-		if !game.checkForAdmin(w, r) {
-			return
-		}
-
+	handler.HandleFunc("GET /config", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		config, err := yaml.Marshal(&game.Config)
 		if err != nil {
 			slog.Error("failed to marshal config", "err", err)
 			http.Error(w, "failed to marshal config", http.StatusInternalServerError)
-			return
+			return nil
 		}
 
-		if err := htm.Render(r.Context(), w, game.publicPageLayout("Config", html.Pre(html.Code(html.Textf("%s", config))))); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err = htm.Render(r.Context(), w,
+			game.publicPageLayout("Config", &user,
+				html.Pre(html.Code(html.Textf("%s", config))),
+			),
+		)
+		return err
+	}))
 
 	// GET /api/config downloads the current YAML configuration.
-	handler.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
-		if !game.checkForAdmin(w, r) {
-			return
-		}
-
+	handler.HandleFunc("GET /api/config", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		w.Header().Set("Content-Type", "application/yaml")
 
 		if err := yaml.NewEncoder(w).Encode(&game.Config); err != nil {
 			slog.Error("failed to encode config", "err", err)
 			http.Error(w, "failed to encode config", http.StatusInternalServerError)
-			return
+			return nil
 		}
-	})
+
+		return nil
+	}))
 
 	// GET /scoreboard lists the scoreboard for the overall state.
-	handler.HandleFunc("GET /scoreboard", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("GET /scoreboard", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
 		page := game.renderScoreboard()
 		if page == nil {
-			page = game.publicPageError(fmt.Errorf("game has not started"))
+			return fmt.Errorf("game has not started")
 		} else {
-			page = game.publicPageLayout("Scoreboard", page)
+			page = game.publicPageLayout("Scoreboard", user, page)
 		}
 
-		if err := htm.Render(r.Context(), w, page); err != nil {
-			slog.Error("failed to render page", "err", err)
-		}
-	})
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
 
 	// GET /api/scoreboard returns the scoreboard for the overall state.
-	handler.HandleFunc("GET /api/scoreboard", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("GET /api/scoreboard", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
 		w.Header().Set("Content-Type", "application/json")
 
 		game.scoreboardMtx.RLock()
 		defer game.scoreboardMtx.RUnlock()
 
-		if err := json.NewEncoder(w).Encode(game.OverallState); err != nil {
-			slog.Error("failed to encode scoreboard", "err", err)
-		}
-	})
+		err := json.NewEncoder(w).Encode(game.OverallState)
+		return err
+	}))
 
 	// GET /api/scoreboard/{tick} returns the scoreboard for a specific tick.
-	handler.HandleFunc("GET /api/scoreboard/{tick}", func(w http.ResponseWriter, r *http.Request) {
+	handler.HandleFunc("GET /api/scoreboard/{tick}", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
 		tickStr := r.PathValue("tick")
 
 		tick, err := strconv.Atoi(tickStr)
 		if err != nil {
 			http.Error(w, "invalid tick", http.StatusBadRequest)
-			return
+			return nil
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -750,35 +792,29 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 		if tick > len(game.Ticks) {
 			http.Error(w, "tick not found", http.StatusNotFound)
-			return
+			return nil
 		}
 
-		if err := json.NewEncoder(w).Encode(game.Ticks[tick-1]); err != nil {
-			slog.Error("failed to encode scoreboard", "err", err)
-		}
-	})
+		err = json.NewEncoder(w).Encode(game.Ticks[tick-1])
+		return err
+	}))
 
 	for path, pageInfo := range game.Config.Pages {
 		if path == "/" {
 			continue
 		}
 
-		handler.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+		handler.HandleFunc("GET "+path, game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
 			body, err := game.renderPage(r.Context(), path)
 			if err != nil {
-				slog.Error("failed to render page", "err", err)
-				if err := htm.Render(r.Context(), w, game.publicPageError(err)); err != nil {
-					slog.Error("failed to render page", "err", err)
-				}
-				return
+				return err
 			}
 
-			page := game.publicPageLayout(pageInfo.Title, body)
+			page := game.publicPageLayout(pageInfo.Title, user, body)
 
-			if err := htm.Render(r.Context(), w, page); err != nil {
-				slog.Error("failed to render page", "err", err)
-			}
-		})
+			err = htm.Render(r.Context(), w, page)
+			return err
+		}))
 	}
 
 	// Router is allowed to be public since it uses an API key to lookup a configuration.

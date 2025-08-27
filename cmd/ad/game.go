@@ -141,6 +141,12 @@ type AttackDefenseGame struct {
 	// TimeScale is the time scale to run the game at.
 	TimeScale float64
 
+	// NoInstances disables instance running and just runs the website + vpn.
+	NoInstances bool
+
+	// AdminUsername is a username to treat as admin
+	AdminUsername *string
+
 	scoreboardMtx sync.RWMutex
 	Running       atomic.Bool
 	CurrentState  *ScoreboardState
@@ -985,47 +991,51 @@ func (game *AttackDefenseGame) Run() error {
 		return fmt.Errorf("failed to load devices: %w", err)
 	}
 
-	// Boot the scorebot.
-	if err := game.Config.ScoreBot.Start(game); err != nil {
-		return fmt.Errorf("failed to start scorebot: %w", err)
-	}
+	if !game.NoInstances {
+		// Boot the scorebot.
+		if err := game.Config.ScoreBot.Start(game); err != nil {
+			return fmt.Errorf("failed to start scorebot: %w", err)
+		}
 
-	// Wait for the scorebot to boot.
-	if err := game.Config.ScoreBot.Wait(); err != nil {
-		return fmt.Errorf("failed to wait for scorebot: %w", err)
-	}
+		// Wait for the scorebot to boot.
+		if err := game.Config.ScoreBot.Wait(); err != nil {
+			return fmt.Errorf("failed to wait for scorebot: %w", err)
+		}
 
-	// Initialize all initial teams.
-	if err := game.ForAllTeams(false, false, func(t *Team, info TargetInfo) error {
-		return t.Start(game)
-	}); err != nil {
-		return fmt.Errorf("failed to start all teams: %w", err)
-	}
+		// Initialize all initial teams.
+		if err := game.ForAllTeams(false, false, func(t *Team, info TargetInfo) error {
+			return t.Start(game)
+		}); err != nil {
+			return fmt.Errorf("failed to start all teams: %w", err)
+		}
 
-	if game.Config.Wait {
-		// Wait for a event to start the game.
-		slog.Info("waiting for event to start game")
+		if game.Config.Wait {
+			// Wait for a event to start the game.
+			slog.Info("waiting for event to start game")
 
-		start := make(chan struct{})
+			start := make(chan struct{})
 
-		game.AddEvent("start", func(ctx context.Context, game *AttackDefenseGame) error {
-			close(start)
-			game.RemoveEvent("start")
-			return nil
-		})
+			game.AddEvent("start", func(ctx context.Context, game *AttackDefenseGame) error {
+				close(start)
+				game.RemoveEvent("start")
+				return nil
+			})
 
-		<-start
-	}
+			<-start
+		}
 
-	// Start the game.
-	if err := game.Start(); err != nil {
-		return fmt.Errorf("failed to start game: %w", err)
-	}
+		// Start the game.
+		if err := game.Start(); err != nil {
+			return fmt.Errorf("failed to start game: %w", err)
+		}
 
-	if game.Config.WaitAfter {
-		slog.Info("use Ctrl+C to stop the game")
+		if game.Config.WaitAfter {
+			slog.Info("use Ctrl+C to stop the game")
 
-		// Yield forever until the user stops the game.
+			// Yield forever until the user stops the game.
+			<-make(chan struct{})
+		}
+	} else {
 		<-make(chan struct{})
 	}
 

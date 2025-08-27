@@ -176,6 +176,15 @@ func (db *PersistDatabase) GetSessionByToken(token string) (Session, error) {
 	}, nil
 }
 
+func (db *PersistDatabase) DeleteSessionByToken(token string) error {
+	_, err := db.exec("delete from sessions where token=?", token)
+	if err != nil {
+		return fmt.Errorf("Failed to get session by token")
+	}
+
+	return nil
+}
+
 func (db *PersistDatabase) queryForEach(query string, cb func(rows *sql.Rows) error) error {
 	rows, err := db.conn.Query(query)
 	if err != nil {
