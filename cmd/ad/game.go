@@ -153,10 +153,13 @@ type AttackDefenseGame struct {
 	NoInstances bool
 
 	scoreboardMtx sync.RWMutex
-	Running       atomic.Bool
+	RunningState  atomic.Int32
 	CurrentState  *ScoreboardState
 	Ticks         []*ScoreboardState
 	OverallState  *ScoreboardState
+
+	// Error that caused termination of game
+	Error error
 
 	publicServer  *http.Server
 	privateServer *http.ServeMux
@@ -167,6 +170,23 @@ type AttackDefenseGame struct {
 	internalWeb    *hostService
 	pingService    *hostService
 	flagSubmission *hostService
+}
+
+const (
+	RunningStateStopped  int32 = 0
+	RunningStateStarting int32 = 1
+	RunningStateStarted  int32 = 2
+)
+
+func (game *AttackDefenseGame) PlayerTeams() []*Team {
+	var teams []*Team
+	for _, team := range teams {
+		if team.IsAdmin() {
+			continue
+		}
+		teams = append(teams, team)
+	}
+	return teams
 }
 
 // Flows implements FlowInstance.
@@ -254,7 +274,7 @@ func (game *AttackDefenseGame) flagsStolenBy(info TargetInfo, serviceId int) []F
 }
 
 func (game *AttackDefenseGame) submitFlag(info TargetInfo, flag string) FlagStatus {
-	if !game.Running.Load() {
+	if game.RunningState.Load() != RunningStateStarted {
 		return GameNotRunning
 	}
 
@@ -459,9 +479,12 @@ func (game *AttackDefenseGame) RemoveEvent(name string) {
 }
 
 // ForAllTeams runs the given function for each team in the game.
-func (game *AttackDefenseGame) ForAllTeams(includeBots bool, background bool, f func(t *Team, info TargetInfo) error) error {
+func (game *AttackDefenseGame) ForAllTeams(includeAdmin bool, includeBots bool, background bool, f func(t *Team, info TargetInfo) error) error {
 	if background {
 		for _, team := range game.Teams {
+			if team.IsAdmin() && !includeAdmin {
+				continue
+			}
 			go func(team *Team) {
 				if err := f(team, team.Info()); err != nil {
 					slog.Error("failed to run function for team", "team id", team.ID, "err", err)
@@ -674,6 +697,10 @@ func (game *AttackDefenseGame) updateScoreboard() error {
 		}
 	}
 
+	if game.OverallState == nil {
+		game.OverallState = game.CurrentState
+	}
+
 	return nil
 }
 
@@ -707,7 +734,7 @@ func (game *AttackDefenseGame) Tick() error {
 	}
 
 	// Send the scorebot command to each team.
-	if err := game.ForAllTeams(true, false, func(t *Team, info TargetInfo) error {
+	if err := game.ForAllTeams(false, true, false, func(t *Team, info TargetInfo) error {
 		start := time.Now()
 
 		// Run the scorebot for each service.
@@ -973,7 +1000,7 @@ func (game *AttackDefenseGame) Run() error {
 	if game.Config.Vulnbox.Bot.Enabled {
 		for name, ev := range game.Config.Vulnbox.Bot.Events {
 			game.AddEvent(fmt.Sprintf("bot/%s", name), func(ctx context.Context, game *AttackDefenseGame) error {
-				return game.ForAllTeams(false, ev.Background, func(t *Team, info TargetInfo) error {
+				return game.ForAllTeams(false, false, ev.Background, func(t *Team, info TargetInfo) error {
 					subCtx, cancel := context.WithTimeout(ctx, game.scaleDuration(ev.Timeout.Duration))
 					defer cancel()
 
@@ -1019,69 +1046,66 @@ func (game *AttackDefenseGame) Run() error {
 		return fmt.Errorf("failed to load devices: %w", err)
 	}
 
-	if !game.NoInstances {
-		// Boot the scorebot.
-		if err := game.Config.ScoreBot.Start(game); err != nil {
-			return fmt.Errorf("failed to start scorebot: %w", err)
-		}
-
-		// Wait for the scorebot to boot.
-		if err := game.Config.ScoreBot.Wait(); err != nil {
-			return fmt.Errorf("failed to wait for scorebot: %w", err)
-		}
-
-		// Initialize all initial teams.
-		if err := game.ForAllTeams(false, false, func(t *Team, info TargetInfo) error {
-			return t.Start(game)
-		}); err != nil {
-			return fmt.Errorf("failed to start all teams: %w", err)
-		}
-
-		if game.Config.Wait {
-			// Wait for a event to start the game.
-			slog.Info("waiting for event to start game")
-
-			start := make(chan struct{})
-
-			game.AddEvent("start", func(ctx context.Context, game *AttackDefenseGame) error {
-				close(start)
-				game.RemoveEvent("start")
-				return nil
-			})
-
-			<-start
-		}
-
-		// Start the game.
-		if err := game.Start(); err != nil {
-			return fmt.Errorf("failed to start game: %w", err)
-		}
-
-		if game.Config.WaitAfter {
-			slog.Info("use Ctrl+C to stop the game")
-
-			// Yield forever until the user stops the game.
-			<-make(chan struct{})
-		}
-	} else {
-		<-make(chan struct{})
-	}
-
 	return nil
 }
 
 func (game *AttackDefenseGame) Start() error {
+	if !game.RunningState.CompareAndSwap(RunningStateStopped, RunningStateStarting) {
+		return fmt.Errorf("already started")
+	}
+
+	game.Error = nil
+	game.CurrentTick = -1
+
+	defer game.RunningState.Store(RunningStateStopped)
+
+	// Boot the scorebot.
+	if err := game.Config.ScoreBot.Start(game); err != nil {
+		return fmt.Errorf("failed to start scorebot: %w", err)
+	}
+
+	// Wait for the scorebot to boot.
+	if err := game.Config.ScoreBot.Wait(); err != nil {
+		return fmt.Errorf("failed to wait for scorebot: %w", err)
+	}
+
+	// Initialize all initial teams.
+	if err := game.ForAllTeams(false, false, false, func(t *Team, info TargetInfo) error {
+		return t.Start(game)
+	}); err != nil {
+		return fmt.Errorf("failed to start all teams: %w", err)
+	}
+
+	if game.Config.Wait {
+		// Wait for a event to start the game.
+		slog.Info("waiting for event to start game")
+
+		start := make(chan struct{})
+
+		game.AddEvent("start", func(ctx context.Context, game *AttackDefenseGame) error {
+			close(start)
+			game.RemoveEvent("start")
+			return nil
+		})
+
+		<-start
+	}
+
 	// Log the start of the game.
 	slog.Info("game starting", "completes", time.Now().Add(game.scaleDuration(game.Config.Duration.Duration)), "totalTicks", game.TotalTicks())
 
-	game.Running.Store(true)
+	game.RunningState.Store(RunningStateStarted)
 
 	// Create a new ticker for the game.
 	game.Ticker = time.NewTicker(game.scaleDuration(game.Config.TickRate.Duration))
 
 	// Create a new timer for the end of the game.
-	// Always add one tick on the end so the game has exactly the right number of ticks.
-	endTime := time.NewTimer(game.scaleDuration(game.Config.Duration.Duration) + game.scaleDuration(game.Config.TickRate.Duration))
+	endTime := time.NewTimer(game.scaleDuration(game.Config.Duration.Duration))
+
+	// First tick
+	if err := game.Tick(); err != nil {
+		slog.Error("failed to tick", "err", err)
+	}
 
 outer:
 	for {
@@ -1100,8 +1124,6 @@ outer:
 	}
 
 	slog.Info("game complete")
-
-	game.Running.Store(false)
 
 	return nil
 }

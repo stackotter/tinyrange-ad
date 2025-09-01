@@ -36,6 +36,10 @@ func GenerateJoinToken() (string, error) {
 	return GenerateRandomString(32)
 }
 
+func (t *Team) IsAdmin() bool {
+	return t.DisplayName == "admin"
+}
+
 func (t *Team) BotId() int { return t.ID + BOT_ID_OFFSET }
 
 func (t *Team) SocId() int { return t.ID + SOC_ID_OFFSET }

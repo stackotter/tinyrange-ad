@@ -60,7 +60,7 @@ func (game *AttackDefenseGame) isAdmin(user User) bool {
 		slog.Error("failed to get user team", "err", err)
 		return false
 	}
-	return team.DisplayName == "admin"
+	return team.IsAdmin()
 }
 
 func (game *AttackDefenseGame) renderScoreboard() htm.Fragment {
@@ -236,6 +236,7 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 		)
 	} else {
 		navitems = append(navitems,
+			bootstrap.NavbarLink("/game", html.Text("Game")),
 			bootstrap.NavbarLink("/teams", html.Text("Teams")),
 			bootstrap.NavbarLink("/devices", html.Text("Devices")),
 			bootstrap.NavbarLink("/instances", html.Text("Instances")),
@@ -373,6 +374,53 @@ func (game *AttackDefenseGame) startPublicServer() error {
 	}))
 
 	// GET /teams lists all teams.
+	handler.HandleFunc("GET /game", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		var content []htm.Fragment
+
+		runningState := game.RunningState.Load()
+		if runningState == RunningStateStarted {
+			content = append(content,
+				html.P(htm.Text("Game is running")),
+				html.P(html.Textf("Tick %d out of %d", game.CurrentTick, game.TotalTicks())),
+			)
+		} else if runningState == RunningStateStarting {
+			content = append(content,
+				html.P(htm.Text("Game is starting")),
+			)
+		} else {
+			content = append(content,
+				html.Form(
+					html.FormTarget("POST", "/api/game/start"),
+					bootstrap.SubmitButton("Start", bootstrap.ButtonColorPrimary),
+				),
+			)
+			if game.Error != nil {
+				content = append(content,
+					html.P(html.Textf("Game failed to start: %v", game.Error)),
+				)
+			}
+		}
+
+		page := game.publicPageLayout("Game", &user, content...)
+
+		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
+
+	// GET /teams lists all teams.
+	handler.HandleFunc("POST /api/game/start", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		go func() {
+			if err := game.Start(); err != nil {
+				slog.Error("Failed to start game", "err", err)
+				game.Error = err
+			}
+		}()
+
+		http.Redirect(w, r, "/game", http.StatusFound)
+		return nil
+	}))
+
+	// GET /teams lists all teams.
 	handler.HandleFunc("GET /teams", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		isAdmin := game.isAdmin(user)
 
@@ -389,12 +437,14 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			}
 		})
 		for _, team := range teams {
-			if team.DisplayName == "admin" && !game.isAdmin(user) {
+			if team.IsAdmin() && !game.isAdmin(user) {
 				continue
 			}
 			var lines []htm.Fragment
 			lines = append(lines, bootstrap.CardTitle(team.DisplayName))
-			lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("IP: %s", team.IP())))
+			if !team.IsAdmin() {
+				lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("IP: %s", team.IP())))
+			}
 			if isAdmin {
 				lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("Join token: %s", team.JoinToken)))
 			}
@@ -404,7 +454,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		var content []htm.Fragment
 		content = append(content, html.Div(teamList...))
 
-		if isAdmin {
+		if isAdmin && game.RunningState.Load() == RunningStateStopped {
 			content = append(content,
 				html.P(
 					html.H2(htm.Text("Create team")),
@@ -425,6 +475,10 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 	// POST /api/team adds a new team.
 	handler.HandleFunc("POST /api/team", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		if game.RunningState.Load() != RunningStateStopped {
+			return fmt.Errorf("game already started")
+		}
+
 		name := r.FormValue("name")
 		if name == "" {
 			return fmt.Errorf("name is required")
