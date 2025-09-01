@@ -180,7 +180,7 @@ const (
 
 func (game *AttackDefenseGame) PlayerTeams() []*Team {
 	var teams []*Team
-	for _, team := range teams {
+	for _, team := range game.Teams {
 		if team.IsAdmin() {
 			continue
 		}
@@ -485,15 +485,14 @@ func (game *AttackDefenseGame) ForAllTeams(includeAdmin bool, includeBots bool, 
 			if team.IsAdmin() && !includeAdmin {
 				continue
 			}
+
 			go func(team *Team) {
 				if err := f(team, team.Info()); err != nil {
 					slog.Error("failed to run function for team", "team id", team.ID, "err", err)
 				}
 			}(team)
-		}
 
-		if includeBots && game.Config.Vulnbox.Bot.Enabled {
-			for _, team := range game.Teams {
+			if includeBots && game.Config.Vulnbox.Bot.Enabled {
 				go func(team *Team) {
 					if err := f(team, team.BotInfo()); err != nil {
 						slog.Error("failed to run function for bot", "team id", team.ID, "err", err)
@@ -508,6 +507,10 @@ func (game *AttackDefenseGame) ForAllTeams(includeAdmin bool, includeBots bool, 
 		errChan := make(chan error, len(game.Teams))
 
 		for _, team := range game.Teams {
+			if team.IsAdmin() && !includeAdmin {
+				continue
+			}
+
 			wg.Add(1)
 			go func(team *Team) {
 				defer wg.Done()
@@ -660,7 +663,7 @@ func (game *AttackDefenseGame) updateScoreboard() error {
 	}
 
 	// Populate the new state with the teams.
-	for _, team := range game.Teams {
+	for _, team := range game.PlayerTeams() {
 		teamState := &TeamState{
 			IsBot: false,
 			Name:  team.DisplayName,
@@ -1056,6 +1059,7 @@ func (game *AttackDefenseGame) Start() error {
 
 	game.Error = nil
 	game.CurrentTick = -1
+	game.instances = []TinyRangeInstance{}
 
 	defer game.RunningState.Store(RunningStateStopped)
 

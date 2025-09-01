@@ -177,6 +177,7 @@ func (f *flowRouterHandler) HandleConn(network string, ip net.IP, port uint16, c
 		if target.InstanceAddress().Equal(ip) {
 			// We found the target, now find the service.
 			for _, service := range target.Services() {
+				slog.Info("checking service", "port", service.Port())
 				if service.Port() == int(port) {
 					slog.Debug("found target", "source", f.instance.Hostname(), "target", target.Hostname(), "service", service.Name())
 					// We now know instance is trying to connect to target:service.
@@ -187,8 +188,6 @@ func (f *flowRouterHandler) HandleConn(network string, ip net.IP, port uint16, c
 			}
 		}
 	}
-
-	// slog.Info("no matching target", "source", instance.InstanceId(), "ip", ip, "port", port)
 
 	// If we reach here, we couldn't find the target.
 	// TODO(joshua): Handle a default route.

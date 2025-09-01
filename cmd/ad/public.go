@@ -21,6 +21,7 @@ import (
 	"github.com/tinyrange/ad/pkg/htm/html"
 	"github.com/tinyrange/ad/pkg/htm/htmx"
 	"github.com/tinyrange/ad/pkg/htm/xtermjs"
+	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -240,6 +241,7 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 			bootstrap.NavbarLink("/teams", html.Text("Teams")),
 			bootstrap.NavbarLink("/devices", html.Text("Devices")),
 			bootstrap.NavbarLink("/instances", html.Text("Instances")),
+			bootstrap.NavbarLink("/team", html.Text("Team")),
 			bootstrap.NavbarLink("/profile", html.Text("Profile")),
 			bootstrap.NavbarLink("/logout", html.Text("Log out")),
 		)
@@ -819,6 +821,46 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		)
 
 		err := htm.Render(r.Context(), w, page)
+		return err
+	}))
+
+	handler.HandleFunc("GET /team", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		if game.RunningState.Load() != RunningStateStarted {
+			return fmt.Errorf("game not started yet")
+		}
+
+		secureConfig, err := game.GetSSHConfig(team.ID)
+		if err != nil {
+			slog.Error("failed to get secure config", "err", err)
+			return err
+		}
+
+		publicKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(secureConfig.PublicKey))
+		if err != nil {
+			slog.Error("failed to parse public key", "err", err)
+			return err
+		}
+
+		content := bootstrap.Card(
+			bootstrap.CardTitle(team.DisplayName),
+			html.P(html.Strong(htm.Text("SSH Command: ")), html.Code(html.Textf("ssh -p 2222 root@%s", team.IP()))),
+			bootstrap.Table(
+				nil,
+				[]htm.Group{
+					{htm.Text("IP"), html.Code(html.Textf("%s", team.IP()))},
+					{htm.Text("Port"), html.Code(html.Textf("%d", 2222))},
+					{htm.Text("Username"), html.Code(html.Textf("%s", "root"))},
+					{htm.Text("Password"), html.Code(html.Textf("%s", secureConfig.Password))},
+					{htm.Text("Fingerprint"), html.Code(html.Textf("%s", ssh.FingerprintSHA256(publicKey)))},
+				},
+			),
+		)
+
+		page := game.publicPageLayout("Team", &user,
+			content,
+		)
+
+		err = htm.Render(r.Context(), w, page)
 		return err
 	}))
 

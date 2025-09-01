@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"strconv"
 )
 
 type DeviceConfig struct {
@@ -42,9 +41,13 @@ func (d *Device) evaluateDeviceVariable(s string) (string, error) {
 	if s == "team" {
 		user, err := d.game.Persist.GetUser(d.userID)
 		if err != nil {
-			return "", fmt.Errorf("failed to get team from user id: %v", err)
+			return "", fmt.Errorf("failed to get team id from user id: %v", err)
 		}
-		return strconv.Itoa(user.TeamID), nil
+		team, err := d.game.Persist.GetTeam(user.TeamID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get team for team id: %v", err)
+		}
+		return team.DisplayName, nil
 	} else {
 		return "", fmt.Errorf("invalid variable variable: %s", s)
 	}

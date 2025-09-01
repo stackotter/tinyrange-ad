@@ -94,7 +94,7 @@ func (game *AttackDefenseGame) registerPrivateServer() error {
 		}
 
 		var teamList []htm.Group
-		for _, team := range game.Teams {
+		for _, team := range game.PlayerTeams() {
 			row := htm.Group{
 				htm.Text(team.DisplayName),
 				htm.Text(team.IP()),
@@ -186,7 +186,7 @@ func (game *AttackDefenseGame) registerPrivateServer() error {
 	// Add an API endpoint for listing current flag ids.
 	game.privateServer.HandleFunc("GET /api/flagIds", func(w http.ResponseWriter, r *http.Request) {
 		flagIds := make([]flagIdApiResponse, 0)
-		for _, team := range game.Teams {
+		for _, team := range game.PlayerTeams() {
 			// Iterate through services with scorebot checks (those are the ones with flags)
 			for _, serviceCheck := range game.Config.ScoreBot.Checks {
 				service := game.Config.Vulnbox.GetService(serviceCheck.Id)
@@ -223,7 +223,7 @@ func (game *AttackDefenseGame) registerPrivateServer() error {
 	game.privateServer.HandleFunc("GET /vulnbox", func(w http.ResponseWriter, r *http.Request) {
 		var teamList htm.Group
 
-		for _, team := range game.Teams {
+		for _, team := range game.PlayerTeams() {
 			secureConfig, err := game.GetSSHConfig(team.ID)
 			if err != nil {
 				slog.Error("failed to get secure config", "err", err)
@@ -267,9 +267,9 @@ func (game *AttackDefenseGame) registerPrivateServer() error {
 			return
 		}
 
-		teams := make([]teamApiResponse, len(game.Teams))
+		teams := make([]teamApiResponse, len(game.PlayerTeams()))
 
-		for i, team := range game.Teams {
+		for i, team := range game.PlayerTeams() {
 			teams[i] = teamApiResponse{
 				Self: team.ID == playerTeam.ID,
 				Id:   team.ID,
