@@ -226,9 +226,7 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 		navitems = append(navitems,
 			bootstrap.NavbarLink("/instances", html.Text("Instances")),
 			bootstrap.NavbarLink("/events", html.Text("Events")),
-			bootstrap.NavbarLink("/devices", html.Text("Devices")),
 			bootstrap.NavbarLink("/config", html.Text("Config")),
-			bootstrap.NavbarLink("/teams", html.Text("Teams")),
 		)
 	}
 
@@ -239,6 +237,8 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 		)
 	} else {
 		navitems = append(navitems,
+			bootstrap.NavbarLink("/teams", html.Text("Teams")),
+			bootstrap.NavbarLink("/devices", html.Text("Devices")),
 			bootstrap.NavbarLink("/profile", html.Text("Profile")),
 			bootstrap.NavbarLink("/logout", html.Text("Log out")),
 		)
@@ -508,13 +508,15 @@ func (game *AttackDefenseGame) startPublicServer() error {
 	}))
 
 	// GET /devices lists all devices and their WireGuard configuration and a button to add a new device.
-	handler.HandleFunc("GET /devices", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
-		// TODO(joshua): Allow teams to add their own instances.
+	handler.HandleFunc("GET /devices", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		devices := game.GetDevices()
 
 		var deviceList []htm.Fragment
 
 		for _, device := range devices {
+			if device.UserID != user.ID {
+				continue
+			}
 			deviceList = append(deviceList, html.Div(
 				bootstrap.Card(
 					bootstrap.CardTitle(device.Name),
@@ -530,18 +532,15 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			))
 		}
 
-		teamNames := []string{}
-		for _, team := range game.Teams {
-			teamNames = append(teamNames, team.DisplayName)
-		}
-
 		page := game.publicPageLayout("Devices", &user,
-			htm.Group(deviceList),
-			html.Form(
-				html.FormTarget("POST", "/api/device"),
-				bootstrap.FormField("Name", "name", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Device Name"}),
-				bootstrap.FormField("Team", "team", html.FormOptions{Kind: html.FormFieldSelect, Required: true, Value: "", Placeholder: "Team", Options: teamNames}),
-				bootstrap.SubmitButton("Add Device", bootstrap.ButtonColorPrimary),
+			html.Div(deviceList...),
+			html.P(
+				html.H2(htm.Text("Add device")),
+				html.Form(
+					html.FormTarget("POST", "/api/device"),
+					bootstrap.FormField("Name", "name", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Device Name"}),
+					bootstrap.SubmitButton("Add device", bootstrap.ButtonColorPrimary),
+				),
 			),
 		)
 
@@ -550,23 +549,13 @@ func (game *AttackDefenseGame) startPublicServer() error {
 	}))
 
 	// POST /api/device adds a new device.
-	handler.HandleFunc("POST /api/device", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+	handler.HandleFunc("POST /api/device", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		name := r.FormValue("name")
 		if name == "" {
 			return fmt.Errorf("name is required")
 		}
 
-		userIDStr := r.FormValue("userID")
-		if userIDStr == "" {
-			return fmt.Errorf("userID is required")
-		}
-
-		userID, err := strconv.Atoi(userIDStr)
-		if err != nil {
-			return fmt.Errorf("userID must be an integer")
-		}
-
-		if err := game.AddDevice(name, userID); err != nil {
+		if err := game.AddDevice(name, user.ID); err != nil {
 			slog.Error("failed to add device", "err", err)
 			return err
 		}

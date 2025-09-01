@@ -14,6 +14,8 @@ type DeviceConfig struct {
 }
 
 type WireguardDevice struct {
+	ID        int
+	UserID    int
 	ConfigUrl string
 	Name      string
 	IP        string
@@ -25,7 +27,6 @@ type Device struct {
 	name   string
 	userID int
 	id     int
-	ip     string
 	flows  []ParsedFlow
 	tags   TagList
 }
