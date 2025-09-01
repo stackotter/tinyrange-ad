@@ -109,8 +109,8 @@ type AttackDefenseGame struct {
 	// Events is a map of events to run.
 	Events map[string]*Event
 
-	// Teams is a map of teams in the game.
-	Teams []*Team
+	// Teams is a map of teams in the game. Make sure to keep in sync with the db.
+	Teams map[int]*Team
 
 	// Router is the wireguard router for the game.
 	Router WireguardRouter
@@ -129,6 +129,11 @@ type AttackDefenseGame struct {
 	// instances is a list of TinyRange instances.
 	instances []TinyRangeInstance
 
+	// Each of teamInstances, socInstances and botInstances holds indices into instances, keyed by team id.
+	teamInstances map[int]int
+	socInstances  map[int]int
+	botInstances  map[int]int
+
 	// devices is a list of external devices in the game.
 	devices []*Device
 
@@ -143,9 +148,6 @@ type AttackDefenseGame struct {
 
 	// NoInstances disables instance running and just runs the website + vpn.
 	NoInstances bool
-
-	// AdminUsername is a username to treat as admin
-	AdminUsername *string
 
 	scoreboardMtx sync.RWMutex
 	Running       atomic.Bool
@@ -429,15 +431,19 @@ func (game *AttackDefenseGame) FlagValidTicks() int64 {
 }
 
 func (game *AttackDefenseGame) AddTeam(name string) error {
-	joinToken, err := GenerateRandomString(32)
+	joinToken, err := GenerateJoinToken()
 	if err != nil {
 		return err
 	}
-	game.Teams = append(game.Teams, &Team{
-		ID:          len(game.Teams),
+	team := Team{
 		DisplayName: name,
 		JoinToken:   joinToken,
-	})
+	}
+	_, err = game.Persist.InsertTeam(&team)
+	if err != nil {
+		return err
+	}
+	game.Teams[team.ID] = &team
 	return nil
 }
 
@@ -771,20 +777,43 @@ func (game *AttackDefenseGame) GenerateKeys() error {
 	return nil
 }
 
+func (game *AttackDefenseGame) teamInstance(teamID int) *TinyRangeInstance {
+	return game.lookupInstance(teamID, game.teamInstances)
+}
+
+func (game *AttackDefenseGame) botInstance(teamID int) *TinyRangeInstance {
+	return game.lookupInstance(teamID, game.botInstances)
+}
+
+func (game *AttackDefenseGame) socInstance(teamID int) *TinyRangeInstance {
+	return game.lookupInstance(teamID, game.socInstances)
+}
+
+func (game *AttackDefenseGame) lookupInstance(teamID int, idMap map[int]int) *TinyRangeInstance {
+	id, ok := idMap[teamID]
+	if !ok {
+		return nil
+	}
+	return &game.instances[id]
+}
+
+func (game *AttackDefenseGame) GetSSHConfig(teamID int) (SecureSSHConfig, error) {
+	inst := game.teamInstance(teamID)
+	if inst == nil {
+		return SecureSSHConfig{}, fmt.Errorf("team instance not set")
+	}
+
+	return (*inst).SecureConfig(), nil
+}
+
 func (game *AttackDefenseGame) instanceFromName(name string) (TinyRangeInstance, error) {
 	if name == "scorebot" {
 		return game.Config.ScoreBot.instance, nil
 	}
 
-	for _, team := range game.Teams {
-		if name == team.teamInstance.Hostname() {
-			return team.teamInstance, nil
-		}
-		if team.botInstance != nil && name == team.botInstance.Hostname() {
-			return team.botInstance, nil
-		}
-		if team.socInstance != nil && name == team.socInstance.Hostname() {
-			return team.socInstance, nil
+	for _, inst := range game.instances {
+		if name == inst.Hostname() {
+			return inst, nil
 		}
 	}
 
@@ -885,14 +914,10 @@ func (game *AttackDefenseGame) startSshServer() error {
 func (game *AttackDefenseGame) Run() error {
 	// Ensure we clean up all instances when we're done.
 	defer func() {
-		for _, team := range game.Teams {
-			if err := team.Stop(); err != nil {
-				slog.Error("failed to stop team", "err", err)
+		for _, inst := range game.instances {
+			if err := inst.Stop(); err != nil {
+				slog.Error("failed to stop instance", "hostname", inst.Hostname(), "err", err)
 			}
-		}
-
-		if err := game.Config.ScoreBot.Stop(); err != nil {
-			slog.Error("failed to stop scorebot", "err", err)
 		}
 	}()
 

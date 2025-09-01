@@ -28,7 +28,6 @@ func (i *arrayFlags) Set(value string) error {
 
 var (
 	configFile       = flag.String("config", "", "The config file to start the Attack/Defense server with.")
-	nopTeam          arrayFlags
 	tinyrangePath    = flag.String("tinyrange", "", "The path to the tinyrange binary.")
 	tinyrangeVMMPath = flag.String("tinyrange-vmm", "", "The path to the tinyrange driver binary.")
 	verbose          = flag.Bool("verbose", false, "Enable verbose logging.")
@@ -45,11 +44,9 @@ var (
 	persistancePath  = flag.String("persist-path", "local/persist", "The directory to persist game data to")
 	routerMTU        = flag.Int("router-mtu", 1420, "The MTU of the router.")
 	noInstances      = flag.Bool("no-instances", false, "Disables game instances and just runs the website and VPN.")
-	adminUsername    = flag.String("admin-username", "", "The admin username. Expects an account to already exist (or to get created) with the given username.")
 )
 
 func appMain() error {
-	flag.Var(&nopTeam, "nop-team", "Create a team with no player attached.")
 	flag.Parse()
 
 	if *cpuprofile != "" {
@@ -114,7 +111,11 @@ func appMain() error {
 		Persist:            db,
 		Config:             config,
 		Events:             make(map[string]*Event),
+		Teams:              make(map[int]*Team),
 		tinyRangeTemplates: make(map[string]string),
+		teamInstances:      make(map[int]int),
+		botInstances:       make(map[int]int),
+		socInstances:       make(map[int]int),
 		SshServer:          *sshServer,
 		SshServerHostKey:   *sshServerHostKey,
 		TimeScale:          *timeScale,
@@ -124,6 +125,13 @@ func appMain() error {
 		PublicPort:         *publicPort,
 		RouterMTU:          *routerMTU,
 	}
+
+	adminJoinToken, err := game.Persist.GetAdminTeamJoinToken()
+	if err != nil {
+		return err
+	}
+
+	slog.Info(fmt.Sprintf("Admin team join token: %s", adminJoinToken))
 
 	if *tinyrangePath != "" {
 		game.TinyRangePath = *tinyrangePath
@@ -167,12 +175,13 @@ func appMain() error {
 		game.NoInstances = true
 	}
 
-	if *adminUsername != "" {
-		game.AdminUsername = adminUsername
-	}
-
-	for _, team := range nopTeam {
-		game.AddTeam(team)
+	// Sync persisted teams
+	err = game.Persist.ForEachTeam(func(team Team) error {
+		game.Teams[team.ID] = &team
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	if err := game.Run(); err != nil {

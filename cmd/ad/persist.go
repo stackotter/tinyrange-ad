@@ -29,14 +29,20 @@ func CreateDatabaseConnection(file string) (*PersistDatabase, error) {
 		return db, nil
 	}
 
+	adminJoinToken, err := GenerateJoinToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate admin team join token: %v", err)
+	}
+
 	sqlStmt := `
 	create table teams (id integer not null primary key, name text not null, join_token text not null);
 	create table users (id integer not null primary key, team integer not null, username text not null, password_hash text not null);
 	create table devices (id integer not null primary key, user integer not null, name text not null, config text);
 	create table instances (id integer not null primary key, team integer not null, name text not null, ssh_config text not null);
-	create table sessions (id integer not null primary key, user integer not null, token text not null, expires_at integer not null)
+	create table sessions (id integer not null primary key, user integer not null, token text not null, expires_at integer not null);
+	insert into teams(name, join_token) values('admin', ?);
 	`
-	_, err = db.conn.Exec(sqlStmt)
+	_, err = db.conn.Exec(sqlStmt, adminJoinToken)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("Failed to create tables: %v", err)
@@ -109,6 +115,19 @@ func (db *PersistDatabase) InsertUser(user *User) (int, error) {
 	return id, nil
 }
 
+func (db *PersistDatabase) InsertTeam(team *Team) (int, error) {
+	id, err := db.exec(
+		"insert into teams(name, join_token) values(?, ?)",
+		team.DisplayName, team.JoinToken,
+	)
+	if err != nil {
+		return id, err
+	}
+
+	team.ID = id
+	return id, nil
+}
+
 func (db *PersistDatabase) InsertSession(session *Session) (int, error) {
 	id, err := db.exec(
 		"insert into sessions(token, user, expires_at) values(?, ?, ?)",
@@ -176,6 +195,37 @@ func (db *PersistDatabase) GetSessionByToken(token string) (Session, error) {
 	}, nil
 }
 
+func (db *PersistDatabase) GetAdminTeamJoinToken() (string, error) {
+	row, err := db.queryOne("select join_token from teams where name='admin'")
+	if err != nil {
+		return "", fmt.Errorf("failed to get admin team join token: %v", err)
+	}
+
+	var joinToken string
+	err = row.Scan(&joinToken)
+	if err != nil {
+		return "", err
+	}
+
+	return joinToken, nil
+}
+
+func (db *PersistDatabase) GetTeam(id int) (Team, error) {
+	row, err := db.queryOne("select name, join_token from teams where id=?", id)
+	if err != nil {
+		return Team{}, fmt.Errorf("failed to get team by id: %v", err)
+	}
+
+	var name string
+	var joinToken string
+	err = row.Scan(&name, &joinToken)
+	if err != nil {
+		return Team{}, err
+	}
+
+	return Team{ID: id, DisplayName: name, JoinToken: joinToken}, nil
+}
+
 func (db *PersistDatabase) DeleteSessionByToken(token string) error {
 	_, err := db.exec("delete from sessions where token=?", token)
 	if err != nil {
@@ -235,6 +285,25 @@ func (db *PersistDatabase) ForEachUser(cb func(user User) error) error {
 				return fmt.Errorf("Failed to scan query result row: %v", err)
 			}
 			if err := cb(User{id, team, name, passwordHash}); err != nil {
+				return err
+			}
+			return nil
+		},
+	)
+}
+
+func (db *PersistDatabase) ForEachTeam(cb func(team Team) error) error {
+	return db.queryForEach(
+		"select id, name, join_token from teams",
+		func(rows *sql.Rows) error {
+			var id int
+			var name string
+			var joinToken string
+			err := rows.Scan(&id, &name, &joinToken)
+			if err != nil {
+				return fmt.Errorf("Failed to scan query result row: %v", err)
+			}
+			if err := cb(Team{id, name, joinToken}); err != nil {
 				return err
 			}
 			return nil

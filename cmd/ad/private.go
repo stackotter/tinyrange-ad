@@ -224,7 +224,7 @@ func (game *AttackDefenseGame) registerPrivateServer() error {
 		var teamList htm.Group
 
 		for _, team := range game.Teams {
-			secureConfig, err := team.GetSSHConfig()
+			secureConfig, err := game.GetSSHConfig(team.ID)
 			if err != nil {
 				slog.Error("failed to get secure config", "err", err)
 				continue

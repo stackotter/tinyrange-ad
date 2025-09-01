@@ -23,10 +23,6 @@ type Team struct {
 	ID          int
 	DisplayName string
 	JoinToken   string
-
-	teamInstance TinyRangeInstance
-	socInstance  TinyRangeInstance
-	botInstance  TinyRangeInstance
 }
 
 type Instance struct {
@@ -36,17 +32,13 @@ type Instance struct {
 	sshConfig string
 }
 
+func GenerateJoinToken() (string, error) {
+	return GenerateRandomString(32)
+}
+
 func (t *Team) BotId() int { return t.ID + BOT_ID_OFFSET }
 
 func (t *Team) SocId() int { return t.ID + SOC_ID_OFFSET }
-
-func (t *Team) GetSSHConfig() (SecureSSHConfig, error) {
-	if t.teamInstance == nil {
-		return SecureSSHConfig{}, fmt.Errorf("team instance not set")
-	}
-
-	return t.teamInstance.SecureConfig(), nil
-}
 
 func (t *Team) IP() string {
 	return net.IPv4(10, 40, 10, 10+byte(t.ID)).String()
@@ -90,22 +82,6 @@ func (t *Team) SocInfo() TargetInfo {
 	}
 }
 
-func (t *Team) Stop() error {
-	if t.teamInstance != nil {
-		if err := t.teamInstance.Stop(); err != nil {
-			return err
-		}
-	}
-
-	if t.botInstance != nil {
-		if err := t.botInstance.Stop(); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 func (t *Team) runBotCommand(ctx context.Context, game *AttackDefenseGame, teamInfo TargetInfo, botInfo TargetInfo, command string) error {
 	commandTpl, err := template.New("command").Parse(command)
 	if err != nil {
@@ -126,8 +102,13 @@ func (t *Team) runBotCommand(ctx context.Context, game *AttackDefenseGame, teamI
 		return err
 	}
 
+	botInstance := game.botInstance(t.ID)
+	if botInstance == nil {
+		return fmt.Errorf("team missing bot instance, team.DisplayName=%s", t.DisplayName)
+	}
+
 	// Run the command.
-	resp, err := t.botInstance.RunCommand(ctx, buf.String())
+	resp, err := (*botInstance).RunCommand(ctx, buf.String())
 	if err != nil {
 		return fmt.Errorf("failed to run bot command(%w): %s", err, resp)
 	}
@@ -173,11 +154,11 @@ func (t *Team) runInitCommand(game *AttackDefenseGame, target TargetInfo) error 
 	var resp string
 
 	if target.IsBot {
-		resp, err = t.botInstance.RunCommand(ctx, buf.String())
+		resp, err = (*game.botInstance(t.ID)).RunCommand(ctx, buf.String())
 	} else if target.IsSoc {
-		resp, err = t.socInstance.RunCommand(ctx, buf.String())
+		resp, err = (*game.socInstance(t.ID)).RunCommand(ctx, buf.String())
 	} else {
-		resp, err = t.teamInstance.RunCommand(ctx, buf.String())
+		resp, err = (*game.teamInstance(t.ID)).RunCommand(ctx, buf.String())
 	}
 	if err != nil {
 		return fmt.Errorf("failed to run init command: %w %s", err, resp)
@@ -196,7 +177,7 @@ func (t *Team) Start(game *AttackDefenseGame) error {
 	if err != nil {
 		return err
 	}
-	t.teamInstance = inst
+	game.teamInstances[t.ID] = len(game.instances) - 1
 
 	if err := inst.ParseFlows(func(s string) (string, error) {
 		if s == "team" {
@@ -247,7 +228,7 @@ func (t *Team) Start(game *AttackDefenseGame) error {
 		if err != nil {
 			return err
 		}
-		t.botInstance = inst
+		game.botInstances[t.ID] = len(game.instances) - 1
 
 		if err := inst.ParseFlows(func(s string) (string, error) {
 			if s == "team" {
@@ -269,12 +250,12 @@ func (t *Team) Start(game *AttackDefenseGame) error {
 		}
 	}
 
-	// If there is a soc, start the soc instance.
+	// Start the soc instance.
 	inst, err = game.StartInstanceFromConfig("team_"+t.DisplayName+"_soc", t.SocIP(), game.Config.Socbox.InstanceConfig)
 	if err != nil {
 		return err
 	}
-	t.socInstance = inst
+	game.socInstances[t.ID] = len(game.instances) - 1
 
 	if err := inst.ParseFlows(func(s string) (string, error) {
 		if s == "team" {

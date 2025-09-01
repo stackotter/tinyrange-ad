@@ -55,7 +55,12 @@ func (game *AttackDefenseGame) requireAuthentication(w http.ResponseWriter, r *h
 }
 
 func (game *AttackDefenseGame) isAdmin(user User) bool {
-	return game.AdminUsername != nil && user.Username == *game.AdminUsername
+	team, err := game.Persist.GetTeam(user.TeamID)
+	if err != nil {
+		slog.Error("failed to get user team", "err", err)
+		return false
+	}
+	return team.DisplayName == "admin"
 }
 
 func (game *AttackDefenseGame) renderScoreboard() htm.Fragment {
@@ -255,7 +260,7 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 				bootstrap.NavbarBrand("/", html.Text(game.Config.Title)),
 				navitems...,
 			),
-			html.Div(bootstrap.Container, htm.Group(body)),
+			html.Div(bootstrap.Container, html.P(body...)),
 		),
 	)
 }
@@ -355,7 +360,18 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		isAdmin := game.isAdmin(user)
 
 		var teamList []htm.Fragment
-		for _, team := range game.Teams {
+		var teams []*Team
+		teams = slices.AppendSeq(teams, maps.Values(game.Teams))
+		slices.SortFunc(teams, func(i *Team, j *Team) int {
+			if i.ID < j.ID {
+				return -1
+			} else if i.ID > j.ID {
+				return 1
+			} else {
+				return 0
+			}
+		})
+		for _, team := range teams {
 			var lines []htm.Fragment
 			lines = append(lines, bootstrap.CardTitle(team.DisplayName))
 			lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("IP: %s", team.IP())))
@@ -365,10 +381,42 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			teamList = append(teamList, html.Div(bootstrap.Card(lines...)))
 		}
 
-		page := game.publicPageLayout("Teams", &user, teamList...)
+		var content []htm.Fragment
+		content = append(content, html.Div(teamList...))
+
+		if isAdmin {
+			content = append(content,
+				html.P(
+					html.H2(htm.Text("Create team")),
+					html.Form(
+						html.FormTarget("POST", "/api/team"),
+						bootstrap.FormField("Name", "name", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Name"}),
+						bootstrap.SubmitButton("Create team", bootstrap.ButtonColorPrimary),
+					),
+				),
+			)
+		}
+
+		page := game.publicPageLayout("Teams", &user, content...)
 
 		err := htm.Render(r.Context(), w, page)
 		return err
+	}))
+
+	// POST /api/team adds a new team.
+	handler.HandleFunc("POST /api/team", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		name := r.FormValue("name")
+		if name == "" {
+			return fmt.Errorf("name is required")
+		}
+
+		if err := game.AddTeam(name); err != nil {
+			slog.Error("failed to add team", "err", err)
+			return err
+		}
+
+		http.Redirect(w, r, "/teams", http.StatusFound)
+		return nil
 	}))
 
 	// GET /connect/{instance} provides a WebSSH terminal to the instance.
