@@ -224,7 +224,6 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 
 	if user != nil && game.isAdmin(*user) {
 		navitems = append(navitems,
-			bootstrap.NavbarLink("/instances", html.Text("Instances")),
 			bootstrap.NavbarLink("/events", html.Text("Events")),
 			bootstrap.NavbarLink("/config", html.Text("Config")),
 		)
@@ -239,6 +238,7 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 		navitems = append(navitems,
 			bootstrap.NavbarLink("/teams", html.Text("Teams")),
 			bootstrap.NavbarLink("/devices", html.Text("Devices")),
+			bootstrap.NavbarLink("/instances", html.Text("Instances")),
 			bootstrap.NavbarLink("/profile", html.Text("Profile")),
 			bootstrap.NavbarLink("/logout", html.Text("Log out")),
 		)
@@ -333,9 +333,22 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		return err
 	}))
 
-	// GET /instances lists all running TinyRange instances and provides a button to SSH via WebSSH.
-	handler.HandleFunc("GET /instances", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
-		instances := game.getInstances()
+	// GET /instances lists all running TinyRange instances for the logged in user's team and provides a button to SSH via WebSSH.
+	handler.HandleFunc("GET /instances", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		var instances []TinyRangeInstance
+		if game.isAdmin(user) {
+			instances = game.getInstances()
+		} else {
+			if game.teamInstance(team.ID) != nil {
+				instances = append(instances, *game.teamInstance(team.ID))
+			}
+			if game.socInstance(team.ID) != nil {
+				instances = append(instances, *game.socInstance(team.ID))
+			}
+			if game.botInstance(team.ID) != nil {
+				instances = append(instances, *game.botInstance(team.ID))
+			}
+		}
 
 		var instanceList []htm.Fragment
 
@@ -347,6 +360,10 @@ func (game *AttackDefenseGame) startPublicServer() error {
 					bootstrap.LinkButton("/connect/"+instance.Hostname(), bootstrap.ButtonColorPrimary, html.Text("Connect")),
 				),
 			))
+		}
+
+		if len(instances) == 0 {
+			instanceList = append(instanceList, html.Text("No instances"))
 		}
 
 		page := game.publicPageLayout("Instances", &user, instanceList...)
@@ -372,6 +389,9 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			}
 		})
 		for _, team := range teams {
+			if team.DisplayName == "admin" && !game.isAdmin(user) {
+				continue
+			}
 			var lines []htm.Fragment
 			lines = append(lines, bootstrap.CardTitle(team.DisplayName))
 			lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("IP: %s", team.IP())))
@@ -420,13 +440,16 @@ func (game *AttackDefenseGame) startPublicServer() error {
 	}))
 
 	// GET /connect/{instance} provides a WebSSH terminal to the instance.
-	handler.HandleFunc("GET /connect/{instance}", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
-		// TODO(joshua): Allow teams to connect to their own instances.
-
+	handler.HandleFunc("GET /connect/{instance}", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		instanceId := r.PathValue("instance")
 
-		if _, err := game.instanceFromName(instanceId); err != nil {
+		instance, err := game.instanceFromName(instanceId)
+		if err != nil {
 			return err
+		}
+
+		if !game.isAdmin(user) && instance.TeamID() != team.ID {
+			return fmt.Errorf("unauthorized")
 		}
 
 		page := game.publicPageLayout("Connect", &user,
@@ -441,12 +464,12 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			},
 		)
 
-		err := htm.Render(r.Context(), w, page)
+		err = htm.Render(r.Context(), w, page)
 		return err
 	}))
 
 	// /api/connect/{instance} provides a WebSocket connection to the instance.
-	handler.HandleFunc("/api/connect/{instance}", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+	handler.HandleFunc("/api/connect/{instance}", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		instanceName := r.PathValue("instance")
 
 		instance, err := game.instanceFromName(instanceName)
@@ -454,6 +477,11 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			slog.Error("failed to get instance", "err", err)
 			http.Error(w, "instance not found", http.StatusNotFound)
 			return nil
+		}
+
+		if !game.isAdmin(user) && instance.TeamID() != team.ID {
+			slog.Error("unauthorized", "err", err)
+			return fmt.Errorf("unauthorized")
 		}
 
 		// Upgrade the connection to a WebSocket.
@@ -465,6 +493,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 		if err := instance.WebSSHHandler(conn); err != nil {
 			slog.Error("failed to handle WebSSH", "err", err)
+			return nil
 		}
 
 		return nil

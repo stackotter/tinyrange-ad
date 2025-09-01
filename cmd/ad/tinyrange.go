@@ -52,6 +52,8 @@ type TinyRangeInstance interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 
 	HealthCheck(check HealthCheckConfig, templateFunc func(s string) (string, error)) error
+
+	TeamID() int
 }
 
 type tinyRangeInstance struct {
@@ -66,10 +68,15 @@ type tinyRangeInstance struct {
 	services     []FlowService
 	flows        []ParsedFlow
 	tags         TagList
+	teamID       int
 }
 
 func (t *tinyRangeInstance) String() string {
 	return t.name
+}
+
+func (t *tinyRangeInstance) TeamID() int {
+	return t.teamID
 }
 
 // AcceptConn implements TinyRangeInstance.
@@ -252,7 +259,7 @@ func generateSSHConfig() (SecureSSHConfig, error) {
 
 func (t *tinyRangeInstance) RunCommand(ctx context.Context, command string) (string, error) {
 	if t.game == nil || t.cmd == nil {
-		return "", fmt.Errorf("instance not started")
+		return "", fmt.Errorf("instance not started, %s", t.cmd)
 	}
 
 	// slog.Info("running command", "instance", t.instanceId, "command", command)
@@ -517,7 +524,7 @@ func (t *tinyRangeInstance) Stop() error {
 	return nil
 }
 
-func NewTinyRangeInstance(game *AttackDefenseGame, name string, ip net.IP, config InstanceConfig) (TinyRangeInstance, error) {
+func NewTinyRangeInstance(game *AttackDefenseGame, name string, ip net.IP, config InstanceConfig, teamID int) (TinyRangeInstance, error) {
 	sshConfig, err := generateSSHConfig()
 	if err != nil {
 		return &tinyRangeInstance{}, fmt.Errorf("Failed to generate SSH config: %v", err)
@@ -528,5 +535,6 @@ func NewTinyRangeInstance(game *AttackDefenseGame, name string, ip net.IP, confi
 		address:      ip,
 		config:       config,
 		secureConfig: sshConfig,
+		teamID:       teamID,
 	}, nil
 }

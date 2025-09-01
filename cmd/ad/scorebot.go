@@ -100,7 +100,7 @@ func (v *ScoreBotConfig) Stop() error {
 }
 
 func (v *ScoreBotConfig) Start(game *AttackDefenseGame) error {
-	inst, err := game.StartInstanceFromConfig("scorebot", SCOREBOT_IP, v.InstanceConfig)
+	inst, err := game.StartInstanceFromConfig("scorebot", SCOREBOT_IP, v.InstanceConfig, game.AdminTeam.ID)
 	if err != nil {
 		return err
 	}

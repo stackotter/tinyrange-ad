@@ -195,19 +195,21 @@ func (db *PersistDatabase) GetSessionByToken(token string) (Session, error) {
 	}, nil
 }
 
-func (db *PersistDatabase) GetAdminTeamJoinToken() (string, error) {
-	row, err := db.queryOne("select join_token from teams where name='admin'")
+func (db *PersistDatabase) GetAdminTeam() (Team, error) {
+	row, err := db.queryOne("select id, name, join_token from teams where name='admin'")
 	if err != nil {
-		return "", fmt.Errorf("failed to get admin team join token: %v", err)
+		return Team{}, fmt.Errorf("failed to get admin team: %v", err)
 	}
 
+	var id int
+	var name string
 	var joinToken string
-	err = row.Scan(&joinToken)
+	err = row.Scan(&id, &name, &joinToken)
 	if err != nil {
-		return "", err
+		return Team{}, err
 	}
 
-	return joinToken, nil
+	return Team{ID: id, DisplayName: name, JoinToken: joinToken}, nil
 }
 
 func (db *PersistDatabase) GetTeam(id int) (Team, error) {

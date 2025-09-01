@@ -107,11 +107,19 @@ func appMain() error {
 		return err
 	}
 
+	adminTeam, err := db.GetAdminTeam()
+	if err != nil {
+		return err
+	}
+
+	slog.Info(fmt.Sprintf("Admin team join token: %s", adminTeam.JoinToken))
+
 	game := &AttackDefenseGame{
 		Persist:            db,
 		Config:             config,
 		Events:             make(map[string]*Event),
 		Teams:              make(map[int]*Team),
+		AdminTeam:          adminTeam,
 		tinyRangeTemplates: make(map[string]string),
 		teamInstances:      make(map[int]int),
 		botInstances:       make(map[int]int),
@@ -125,13 +133,6 @@ func appMain() error {
 		PublicPort:         *publicPort,
 		RouterMTU:          *routerMTU,
 	}
-
-	adminJoinToken, err := game.Persist.GetAdminTeamJoinToken()
-	if err != nil {
-		return err
-	}
-
-	slog.Info(fmt.Sprintf("Admin team join token: %s", adminJoinToken))
 
 	if *tinyrangePath != "" {
 		game.TinyRangePath = *tinyrangePath

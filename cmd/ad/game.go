@@ -112,6 +112,9 @@ type AttackDefenseGame struct {
 	// Teams is a map of teams in the game. Make sure to keep in sync with the db.
 	Teams map[int]*Team
 
+	// AdminTeam is the admin team. Make sure to keep in sync with the db if JoinToken changes.
+	AdminTeam Team
+
 	// Router is the wireguard router for the game.
 	Router WireguardRouter
 
@@ -374,21 +377,19 @@ func (game *AttackDefenseGame) ensureTemplateCached(templateFilename string, ram
 	return nil
 }
 
-func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, config InstanceConfig) (TinyRangeInstance, error) {
+func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, config InstanceConfig, teamID int) (TinyRangeInstance, error) {
 	// Check if the template is already cached.
 	if err := game.ensureTemplateCached(config.Template, config.Ram); err != nil {
 		return nil, err
 	}
 
 	// Start the instance.
-	inst, err := NewTinyRangeInstance(game, name, net.ParseIP(ip), config)
+	inst, err := NewTinyRangeInstance(game, name, net.ParseIP(ip), config, teamID)
 	if err != nil {
 		return nil, err
 	}
 
 	slog.Info("starting instance", "template", config.Template, "instance", inst, "name", name)
-
-	game.instances = append(game.instances, inst)
 
 	handler, err := game.Flow.AddInstance(inst)
 	if err != nil {
@@ -407,6 +408,8 @@ func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, c
 	if err := inst.Start(config.Template, wg); err != nil {
 		return nil, err
 	}
+
+	game.instances = append(game.instances, inst)
 
 	return inst, nil
 }
