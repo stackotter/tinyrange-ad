@@ -179,13 +179,18 @@ func (f *flowRouterHandler) HandleConn(network string, ip net.IP, port uint16, c
 			for _, service := range target.Services() {
 				slog.Info("checking service", "port", service.Port())
 				if service.Port() == int(port) {
-					slog.Debug("found target", "source", f.instance.Hostname(), "target", target.Hostname(), "service", service.Name())
 					// We now know instance is trying to connect to target:service.
-					if f.router.handleConnection(f.instance, target, service, conn) {
-						return
+					slog.Debug("found target", "source", f.instance.Hostname(), "target", target.Hostname(), "service", service.Name())
+					err := f.router.handleConnection(f.instance, target, service, conn)
+					if err != nil {
+						slog.Warn("failed to handle connection (found service)", "err", err)
+						conn.Close()
 					}
+					return
 				}
 			}
+
+			slog.Warn(fmt.Sprintf("no service matches port %d on instance %s", port, target.Hostname()))
 		}
 	}
 
@@ -203,18 +208,12 @@ type FlowRouter struct {
 	instances map[string]*flowRouterHandler
 }
 
-func (r *FlowRouter) handleConnection(source FlowInstance, target FlowInstance, service FlowService, conn net.Conn) bool {
+func isRequestAllowed(source FlowInstance, target FlowInstance, service FlowService) bool {
 	// Iterate though each flow.
 	for _, flow := range source.Flows() {
-		// Check if the source tags match.
-		if !source.Tags().ContainsAny(source.Tags()) {
-			slog.Debug("rejected source", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "service", service.Name())
-			continue
-		}
-
 		// Check if the target tags match.
 		if flow.Instance == "*" {
-			if !target.Tags().ContainsMatchingPrefix(fmt.Sprintf("%s/", flow.Tag)) {
+			if flow.Tag != "*" && !target.Tags().ContainsMatchingPrefix(fmt.Sprintf("%s/", flow.Tag)) {
 				slog.Debug("rejected target partial", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "targetTags", target.Tags())
 				continue
 			}
@@ -229,12 +228,19 @@ func (r *FlowRouter) handleConnection(source FlowInstance, target FlowInstance, 
 			continue
 		}
 
-		// We have a match, accept the connection.
-		service.AcceptConn(source, target, service, conn)
 		return true
 	}
-	slog.Debug("no matching flow", "source", source.Hostname(), "target", target.Hostname(), "service", service.Name())
+
 	return false
+}
+
+func (r *FlowRouter) handleConnection(source FlowInstance, target FlowInstance, service FlowService, conn net.Conn) error {
+	if !isRequestAllowed(source, target, service) {
+		return fmt.Errorf("request blocked (no matching flow), source=%s, target=%s, service=%s", source.Hostname(), target.Hostname(), service.Name())
+	}
+
+	service.AcceptConn(source, target, service, conn)
+	return nil
 }
 
 func (r *FlowRouter) dialContext(ctx context.Context, source FlowInstance, target FlowInstance, service FlowService, network, address string) (net.Conn, error) {

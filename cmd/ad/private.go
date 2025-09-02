@@ -191,7 +191,7 @@ func (game *AttackDefenseGame) registerPrivateServer() error {
 			for _, serviceCheck := range game.Config.ScoreBot.Checks {
 				service := game.Config.Vulnbox.GetService(serviceCheck.Id)
 				if service == nil {
-					http.Error(w, fmt.Sprintf("check %id doesn't have corresponding service", serviceCheck.Id), http.StatusInternalServerError)
+					http.Error(w, fmt.Sprintf("check %d doesn't have corresponding service", serviceCheck.Id), http.StatusInternalServerError)
 					return
 				}
 

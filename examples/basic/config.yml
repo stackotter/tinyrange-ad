@@ -86,7 +86,7 @@ socbox:
     - public/*:public
     - team/*:public
     - team/{team}:private
-    - bot/{team}:private
+    - bot/{team}:public
 
   tags:
     - team/{team}

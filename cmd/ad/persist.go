@@ -21,7 +21,7 @@ func CreateDatabaseConnection(file string) (*PersistDatabase, error) {
 
 	conn, err := sql.Open("sqlite3", file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database", err)
+		return nil, fmt.Errorf("failed to open database: %v", err)
 	}
 
 	db := &PersistDatabase{conn}
