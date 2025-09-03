@@ -123,7 +123,9 @@ func (r *wireguardRouter) serveConfig(w http.ResponseWriter, req *http.Request) 
 
 	slog.Debug("serving wireguard config", "config", configKey)
 
+	r.mtx.Lock()
 	config, ok := r.configs[configKey]
+	r.mtx.Unlock()
 	if !ok {
 		http.Error(w, "config not found", http.StatusNotFound)
 		return

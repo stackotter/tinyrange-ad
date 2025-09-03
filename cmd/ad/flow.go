@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/tinyrange/wireguard"
 )
@@ -171,14 +172,16 @@ func (f *flowRouterHandler) HandleConn(network string, ip net.IP, port uint16, c
 	slog.Debug("handling connection", "source", f.instance.Hostname(), "ip", ip, "port", port)
 
 	// find the target by IP
+	f.router.mtx.RLock()
 	for _, inst := range f.router.instances {
 		target := inst.instance
 
 		if target.InstanceAddress().Equal(ip) {
 			// We found the target, now find the service.
 			for _, service := range target.Services() {
-				slog.Info("checking service", "port", service.Port())
+				slog.Debug("checking service", "port", service.Port())
 				if service.Port() == int(port) {
+					f.router.mtx.RUnlock()
 					// We now know instance is trying to connect to target:service.
 					slog.Debug("found target", "source", f.instance.Hostname(), "target", target.Hostname(), "service", service.Name())
 					err := f.router.handleConnection(f.instance, target, service, conn)
@@ -194,6 +197,8 @@ func (f *flowRouterHandler) HandleConn(network string, ip net.IP, port uint16, c
 		}
 	}
 
+	f.router.mtx.RUnlock()
+
 	// If we reach here, we couldn't find the target.
 	// TODO(joshua): Handle a default route.
 	slog.Warn("no matching target", "source", f.instance.Hostname(), "ip", ip, "port", port)
@@ -205,26 +210,27 @@ var (
 )
 
 type FlowRouter struct {
+	mtx       sync.RWMutex
 	instances map[string]*flowRouterHandler
 }
 
-func isRequestAllowed(source FlowInstance, target FlowInstance, service FlowService) bool {
+func isRequestAllowed(sourceFlows []ParsedFlow, targetTags TagList, serviceTags TagList) bool {
 	// Iterate though each flow.
-	for _, flow := range source.Flows() {
+	for _, flow := range sourceFlows {
 		// Check if the target tags match.
 		if flow.Instance == "*" {
-			if flow.Tag != "*" && !target.Tags().ContainsMatchingPrefix(fmt.Sprintf("%s/", flow.Tag)) {
-				slog.Debug("rejected target partial", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "targetTags", target.Tags())
+			if flow.Tag != "*" && !targetTags.ContainsMatchingPrefix(fmt.Sprintf("%s/", flow.Tag)) {
+				slog.Debug("rejected target partial", "flow", flow, "targetTags", targetTags)
 				continue
 			}
-		} else if !target.Tags().Contains(fmt.Sprintf("%s/%s", flow.Tag, flow.Instance)) {
-			slog.Debug("rejected target", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "targetTags", target.Tags())
+		} else if !targetTags.Contains(fmt.Sprintf("%s/%s", flow.Tag, flow.Instance)) {
+			slog.Debug("rejected target", "flow", flow, "targetTags", targetTags)
 			continue
 		}
 
 		// Check if the service tags match.
-		if !service.Tags().Contains(flow.Service) {
-			slog.Debug("rejected service", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "service", service.Name())
+		if flow.Service != "*" && !serviceTags.Contains(flow.Service) {
+			slog.Debug("rejected service", "flow", flow, "serviceTags", serviceTags)
 			continue
 		}
 
@@ -235,7 +241,7 @@ func isRequestAllowed(source FlowInstance, target FlowInstance, service FlowServ
 }
 
 func (r *FlowRouter) handleConnection(source FlowInstance, target FlowInstance, service FlowService, conn net.Conn) error {
-	if !isRequestAllowed(source, target, service) {
+	if !isRequestAllowed(source.Flows(), target.Tags(), service.Tags()) {
 		return fmt.Errorf("request blocked (no matching flow), source=%s, target=%s, service=%s", source.Hostname(), target.Hostname(), service.Name())
 	}
 
@@ -244,41 +250,12 @@ func (r *FlowRouter) handleConnection(source FlowInstance, target FlowInstance, 
 }
 
 func (r *FlowRouter) dialContext(ctx context.Context, source FlowInstance, target FlowInstance, service FlowService, network, address string) (net.Conn, error) {
-	if source == nil {
-		// If source is nil, we are dialing from the router itself.
-		return service.DialContext(ctx, target)
+	// If source is nil, we are dialing from the router itself.
+	if source != nil && !isRequestAllowed(source.Flows(), target.Tags(), service.Tags()) {
+		return nil, fmt.Errorf("no matching flow: %s", address)
 	}
 
-	// Otherwise we are dialing from an instance so validate it's a valid flow.
-	for _, flow := range source.Flows() {
-		// Check if the source tags match.
-		if !source.Tags().ContainsAny(source.Tags()) {
-			slog.Debug("rejected source", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "service", service.Name)
-			continue
-		}
-
-		// Check if the target tags match.
-		if flow.Instance == "*" {
-			if !target.Tags().ContainsMatchingPrefix(fmt.Sprintf("%s/", flow.Tag)) {
-				slog.Debug("rejected target partial", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "targetTags", target.Tags())
-				continue
-			}
-		} else if !target.Tags().Contains(fmt.Sprintf("%s/%s", flow.Tag, flow.Instance)) {
-			slog.Debug("rejected target", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "targetTags", target.Tags())
-			continue
-		}
-
-		// Check if the service tags match.
-		if !service.Tags().Contains(flow.Service) {
-			slog.Debug("rejected service", "flow", flow, "source", source.Hostname(), "target", target.Hostname(), "service", service.Name)
-			continue
-		}
-
-		// We have a match, dial the connection.
-		return service.DialContext(ctx, target)
-	}
-
-	return nil, fmt.Errorf("no matching flow: %s", address)
+	return service.DialContext(ctx, target)
 }
 
 func (r *FlowRouter) DialContext(ctx context.Context, source FlowInstance, network, address string) (net.Conn, error) {
@@ -294,6 +271,10 @@ func (r *FlowRouter) DialContext(ctx context.Context, source FlowInstance, netwo
 		return nil, fmt.Errorf("failed to parse address: %w", err)
 	}
 
+	// We manually unlock on each exit path so that we can unlock before actually
+	// doing the dialing (so that we don't hold the lock for longer than necessary).
+	r.mtx.RLock()
+
 	// Find the target instance.
 	for _, inst := range r.instances {
 		target := inst.instance
@@ -305,6 +286,7 @@ func (r *FlowRouter) DialContext(ctx context.Context, source FlowInstance, netwo
 			for _, service := range target.Services() {
 				if strconv.Itoa(service.Port()) == port || service.Name() == port {
 					// We now know instance is trying to connect to target:service.
+					r.mtx.RUnlock()
 					return r.dialContext(ctx, source, target, service, network, address)
 				}
 			}
@@ -315,16 +297,20 @@ func (r *FlowRouter) DialContext(ctx context.Context, source FlowInstance, netwo
 			for _, service := range target.Services() {
 				if strconv.Itoa(service.Port()) == port || service.Name() == port {
 					// We now know instance is trying to connect to target:service.
+					r.mtx.RUnlock()
 					return r.dialContext(ctx, source, target, service, network, address)
 				}
 			}
 		}
 	}
 
+	r.mtx.RUnlock()
 	return nil, fmt.Errorf("no matching target: %s -> %s", source, address)
 }
 
 func (r *FlowRouter) AddInstance(instance FlowInstance) (NetHandler, error) {
+	r.mtx.Lock()
+	defer r.mtx.Unlock()
 	if _, ok := r.instances[instance.Hostname()]; ok {
 		return nil, fmt.Errorf("instance already exists: %s", instance.Hostname())
 	}

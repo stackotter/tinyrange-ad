@@ -113,6 +113,10 @@ func TestHandleConnection(t *testing.T) {
 		t.Errorf("valid request blocked")
 	}
 
+	if !isAllowed([]ParsedFlow{{"team", "1", "*"}}, TagList{"team/1"}, TagList{}) {
+		t.Errorf("valid request blocked")
+	}
+
 	// Tag wildcards without instance wildcards are ignored (`*` is treated as a regular tag in this case)
 	if isAllowed([]ParsedFlow{{"*", "1", "public"}}, TagList{"team/1"}, TagList{"public"}) {
 		t.Errorf("invalid request allowed")

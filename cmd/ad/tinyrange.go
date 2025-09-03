@@ -18,7 +18,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,12 +48,13 @@ type TinyRangeInstance interface {
 	WebSSHHandler(ws *websocket.Conn) error
 
 	ParseFlows(f ReplaceFunc) error
+	ParseFlowsAsTeam(team Team) error
 	AddService(service FlowService)
 
 	AcceptConn(source FlowInstance, service FlowService, conn net.Conn)
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 
-	HealthCheck(check HealthCheckConfig, templateFunc func(s string) (string, error)) error
+	HealthCheck(check HealthCheckConfig) error
 
 	TeamID() int
 }
@@ -119,6 +122,19 @@ func (t *tinyRangeInstance) ParseFlows(f ReplaceFunc) error {
 	t.flows = flows
 	t.tags = tags
 
+	return nil
+}
+
+func (t *tinyRangeInstance) ParseFlowsAsTeam(team Team) error {
+	if err := t.ParseFlows(func(s string) (string, error) {
+		if s == "team" {
+			return team.DisplayName, nil
+		} else {
+			return "", fmt.Errorf("invalid flow variable: %s", s)
+		}
+	}); err != nil {
+		return fmt.Errorf("failed to parse flows for team (%d): %w", team.ID, err)
+	}
 	return nil
 }
 
@@ -199,7 +215,7 @@ func (t *tinyRangeInstance) Start(templateName string, wg WireguardInstance) err
 		t.game.TinyRangeVMMPath,
 		"-wireguard-url", wg.ConfigUrl(),
 		"-secure-ssh", secureSSHPath.Name(),
-		"-persist-path", "persist",
+		"-persist-path", t.game.PersistenceDir,
 	}
 
 	secureSSHPath.Close()
@@ -307,7 +323,7 @@ func (t *tinyRangeInstance) RunCommand(ctx context.Context, command string) (str
 	return string(out), nil
 }
 
-func (t *tinyRangeInstance) HealthCheck(check HealthCheckConfig, templateFunc func(s string) (string, error)) error {
+func (t *tinyRangeInstance) HealthCheck(check HealthCheckConfig) error {
 	switch check.Kind {
 	case HealthCheckKindHTTP:
 		client := http.Client{
@@ -318,10 +334,20 @@ func (t *tinyRangeInstance) HealthCheck(check HealthCheckConfig, templateFunc fu
 			},
 		}
 
-		url, err := templateFunc(check.URL)
+		tpl, err := template.New("health_check").Parse(check.URL)
 		if err != nil {
 			return fmt.Errorf("failed to parse url: %w", err)
 		}
+
+		var buf strings.Builder
+		if err := tpl.Execute(&buf, &struct {
+			IP string
+		}{
+			IP: t.InstanceAddress().String(),
+		}); err != nil {
+			return fmt.Errorf("failed to parse url: %w", err)
+		}
+		url := buf.String()
 
 		req, err := http.NewRequest(http.MethodGet, url, nil)
 		if err != nil {

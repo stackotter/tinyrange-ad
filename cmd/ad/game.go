@@ -73,6 +73,9 @@ type AttackDefenseGame struct {
 	// Persist is the database for the game to persist state.
 	Persist *PersistDatabase
 
+	// PersistenceDir is the directory to store game related files in.
+	PersistenceDir string
+
 	// Config is the configuration for the game.
 	Config Config
 
@@ -128,6 +131,9 @@ type AttackDefenseGame struct {
 	// TinyRangeTemplates is a map of tinyrange templates that are already cached.
 	// It points to the VM config filename.
 	tinyRangeTemplates map[string]string
+
+	// instanceMutex is used to guard access to instances, teamInstances, socInstances, botInstances, and devices
+	instanceMutex sync.RWMutex
 
 	// instances is a list of TinyRange instances.
 	instances []TinyRangeInstance
@@ -228,7 +234,11 @@ func (game *AttackDefenseGame) ResolvePath(path string) string {
 }
 
 func (game *AttackDefenseGame) getInstances() []TinyRangeInstance {
-	return game.instances
+	game.instanceMutex.RLock()
+	defer game.instanceMutex.RUnlock()
+	instances := make([]TinyRangeInstance, len(game.instances))
+	copy(instances, game.instances)
+	return instances
 }
 
 func (game *AttackDefenseGame) GetEvents() []string {
@@ -397,6 +407,27 @@ func (game *AttackDefenseGame) ensureTemplateCached(templateFilename string, ram
 	return nil
 }
 
+func (game *AttackDefenseGame) StartTeamInstanceFromConfig(name string, ip string, config InstanceConfig, team Team, initCommandTemplate string, services []ServiceConfig) (TinyRangeInstance, error) {
+	inst, err := game.StartInstanceFromConfig(name, ip, config, team.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := inst.ParseFlowsAsTeam(team); err != nil {
+		return nil, fmt.Errorf("failed to parse flows for team (%d): %w", team.ID, err)
+	}
+
+	for _, service := range game.Config.Vulnbox.Services {
+		inst.AddService(&service)
+	}
+
+	if err := team.runInitCommand(inst, initCommandTemplate); err != nil {
+		return nil, fmt.Errorf("failed to run init command for team: %w", err)
+	}
+
+	return inst, nil
+}
+
 func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, config InstanceConfig, teamID int) (TinyRangeInstance, error) {
 	// Check if the template is already cached.
 	if err := game.ensureTemplateCached(config.Template, config.Ram); err != nil {
@@ -429,7 +460,9 @@ func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, c
 		return nil, err
 	}
 
+	game.instanceMutex.Lock()
 	game.instances = append(game.instances, inst)
+	game.instanceMutex.Unlock()
 
 	return inst, nil
 }
@@ -811,23 +844,36 @@ func (game *AttackDefenseGame) GenerateKeys() error {
 }
 
 func (game *AttackDefenseGame) teamInstance(teamID int) *TinyRangeInstance {
-	return game.lookupInstance(teamID, game.teamInstances)
+	game.instanceMutex.RLock()
+	defer game.instanceMutex.RUnlock()
+	return game.lookupInstance(teamID, game.teamInstances, false)
 }
 
 func (game *AttackDefenseGame) botInstance(teamID int) *TinyRangeInstance {
-	return game.lookupInstance(teamID, game.botInstances)
+	game.instanceMutex.RLock()
+	defer game.instanceMutex.RUnlock()
+	return game.lookupInstance(teamID, game.botInstances, false)
 }
 
 func (game *AttackDefenseGame) socInstance(teamID int) *TinyRangeInstance {
-	return game.lookupInstance(teamID, game.socInstances)
+	game.instanceMutex.RLock()
+	defer game.instanceMutex.RUnlock()
+	return game.lookupInstance(teamID, game.socInstances, false)
 }
 
-func (game *AttackDefenseGame) lookupInstance(teamID int, idMap map[int]int) *TinyRangeInstance {
+func (game *AttackDefenseGame) lookupInstance(teamID int, idMap map[int]int, acquireLock bool) *TinyRangeInstance {
 	id, ok := idMap[teamID]
 	if !ok {
 		return nil
 	}
-	return &game.instances[id]
+	if acquireLock {
+		game.instanceMutex.RLock()
+	}
+	inst := &game.instances[id]
+	if acquireLock {
+		game.instanceMutex.RUnlock()
+	}
+	return inst
 }
 
 func (game *AttackDefenseGame) GetSSHConfig(teamID int) (SecureSSHConfig, error) {
@@ -844,6 +890,8 @@ func (game *AttackDefenseGame) instanceFromName(name string) (TinyRangeInstance,
 		return game.Config.ScoreBot.instance, nil
 	}
 
+	game.instanceMutex.RLock()
+	defer game.instanceMutex.RUnlock()
 	for _, inst := range game.instances {
 		if name == inst.Hostname() {
 			return inst, nil
@@ -947,6 +995,8 @@ func (game *AttackDefenseGame) startSshServer() error {
 func (game *AttackDefenseGame) Run() error {
 	// Ensure we clean up all instances when we're done.
 	defer func() {
+		game.instanceMutex.RLock()
+		defer game.instanceMutex.RUnlock()
 		for _, inst := range game.instances {
 			if err := inst.Stop(); err != nil {
 				slog.Error("failed to stop instance", "hostname", inst.Hostname(), "err", err)
@@ -1042,7 +1092,9 @@ func (game *AttackDefenseGame) Run() error {
 		}
 
 		dev.wg = wg
+		game.instanceMutex.Lock()
 		game.devices = append(game.devices, dev)
+		game.instanceMutex.Unlock()
 
 		return nil
 	}); err != nil {
@@ -1077,8 +1129,18 @@ func (game *AttackDefenseGame) Start() error {
 	if err := game.ForAllTeams(false, false, false, func(t *Team, info TargetInfo) error {
 		return t.Start(game)
 	}); err != nil {
-		return fmt.Errorf("failed to start all teams: %w", err)
+		return fmt.Errorf("failed to start team instances: %w", err)
 	}
+
+	// for _, team := range game.Teams {
+	// 	if team.IsAdmin() {
+	// 		continue
+	// 	}
+	// 	err := team.Start(game)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to start team '%s': %w", team.DisplayName, err)
+	// 	}
+	// }
 
 	if game.Config.Wait {
 		// Wait for a event to start the game.
@@ -1181,7 +1243,9 @@ func (game *AttackDefenseGame) AddDevice(name string, userID int) error {
 	}
 
 	dev.wg = wg
+	game.instanceMutex.Lock()
 	game.devices = append(game.devices, dev)
+	game.instanceMutex.Unlock()
 
 	slog.Info("added device", "name", name, "hostname", dev.Hostname())
 
@@ -1193,6 +1257,9 @@ func (game *AttackDefenseGame) DialContext(ctx context.Context, source FlowInsta
 }
 
 func (game *AttackDefenseGame) GetDevices() []WireguardDevice {
+	game.instanceMutex.RLock()
+	defer game.instanceMutex.RUnlock()
+
 	devices := make([]WireguardDevice, 0, len(game.devices))
 
 	for _, dev := range game.devices {

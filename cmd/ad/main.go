@@ -115,6 +115,7 @@ func appMain() error {
 
 	game := &AttackDefenseGame{
 		Persist:            db,
+		PersistenceDir:     persistDir,
 		Config:             config,
 		Events:             make(map[string]*Event),
 		Teams:              make(map[int]*Team),

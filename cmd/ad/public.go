@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gomarkdown/markdown"
@@ -100,7 +101,12 @@ func (game *AttackDefenseGame) renderScoreboard() htm.Fragment {
 	var rows []htm.Group
 	sortedTeams := slices.Collect(maps.Values(scoreboard.Teams))
 	slices.SortFunc(sortedTeams, func(a, b *TeamState) int {
-		return a.Position - b.Position
+		diff := a.Position - b.Position
+		if diff == 0 {
+			return strings.Compare(a.Name, b.Name)
+		} else {
+			return diff
+		}
 	})
 	for _, team := range sortedTeams {
 		row := htm.Group{
@@ -225,6 +231,7 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 
 	if user != nil && game.isAdmin(*user) {
 		navitems = append(navitems,
+			bootstrap.NavbarLink("/game", html.Text("Game")),
 			bootstrap.NavbarLink("/events", html.Text("Events")),
 			bootstrap.NavbarLink("/config", html.Text("Config")),
 		)
@@ -237,7 +244,6 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 		)
 	} else {
 		navitems = append(navitems,
-			bootstrap.NavbarLink("/game", html.Text("Game")),
 			bootstrap.NavbarLink("/teams", html.Text("Teams")),
 			bootstrap.NavbarLink("/devices", html.Text("Devices")),
 			bootstrap.NavbarLink("/instances", html.Text("Instances")),

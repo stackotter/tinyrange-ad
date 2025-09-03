@@ -16,6 +16,7 @@ def main(args):
 
     service = "pkappa2"
     port = 80
+    check = True
 
     os.mkdir("/root/pkappa2/data")
     with open("/root/pkappa2/data/2025-05-06_235911.401.2.state.json", "w") as f:
@@ -81,31 +82,54 @@ directory="/root/{service}"
         stderr=subprocess.DEVNULL,
     )
 
-    time.sleep(1)
+    # Keep requesting the service until it has either started or crashed
+    STARTED = "* status: started"
+    status = STARTED
+    while True:
+        # Check if the service is running
+        response = subprocess.run(
+            ["service", service, "status"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        if response.returncode != 0:
+            print(f"failed: {service}:", response.stderr)
+            return
+        status = response.stdout.decode().strip()
 
-    # Check if the service is running
-    response = subprocess.run(
-        ["service", service, "status"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    if response.returncode != 0:
-        print(f"error: {service}:", response.stderr)
-        return
+        if status != STARTED:
+            print(f"failed: {status}")
+            return
 
-    # Request the homepage of the service
-    response = subprocess.run(
-        ["curl", f"http://localhost:{port}/"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if response.returncode != 0:
-        print(f"error: {service}:", response.stderr)
-        return
+        if not check:
+            break
+
+        # Request the homepage of the service
+        failed = False
+        try:
+            response = subprocess.run(
+                ["curl", f"http://localhost:{port}/"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=0.5
+            )
+            if response.returncode != 0:
+                failed = True
+        except Exception:
+            failed = True
+
+        if not failed:
+            break
+        else:
+            time.sleep(0.5)
+
     print("success")
 
 
 if __name__ == "__main__":
     import sys
 
-    main(sys.argv[1:])
+    try:
+        main(sys.argv[1:])
+    except Exception as e:
+        print(f"exception: {e}")

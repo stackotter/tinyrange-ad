@@ -122,54 +122,41 @@ func (t *Team) runBotCommand(ctx context.Context, game *AttackDefenseGame, teamI
 	return nil
 }
 
-func (t *Team) runInitCommand(game *AttackDefenseGame, target TargetInfo) error {
-	templateString := game.Config.Vulnbox.InitTemplate
-	if target.IsSoc {
-		templateString = game.Config.Socbox.InitTemplate
-	}
-
-	initTpl, err := template.New("init").Parse(templateString)
+func (t *Team) runInitCommand(inst TinyRangeInstance, commandTemplate string) error {
+	slog.Debug("running init command for team", "displayName", t.DisplayName)
+	initTpl, err := template.New("init").Parse(commandTemplate)
 	if err != nil {
 		return err
 	}
 
-	var buf strings.Builder
-
-	if err := initTpl.Execute(&buf, &struct {
+	var command strings.Builder
+	if err := initTpl.Execute(&command, &struct {
 		IP        string
 		VulnboxIP string
 		BotIP     string
 		SocboxIP  string
 		TeamName  string
 	}{
-		IP:        target.IP,
+		IP:        inst.InstanceAddress().String(),
 		VulnboxIP: t.IP(),
 		BotIP:     t.BotIP(),
 		SocboxIP:  t.SocIP(),
-		TeamName:  target.Name,
+		TeamName:  t.DisplayName,
 	}); err != nil {
 		return err
 	}
 
 	// Run the init command.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	var resp string
-
-	if target.IsBot {
-		resp, err = (*game.botInstance(t.ID)).RunCommand(ctx, buf.String())
-	} else if target.IsSoc {
-		resp, err = (*game.socInstance(t.ID)).RunCommand(ctx, buf.String())
-	} else {
-		resp, err = (*game.teamInstance(t.ID)).RunCommand(ctx, buf.String())
-	}
+	resp, err := inst.RunCommand(ctx, command.String())
 	if err != nil {
-		return fmt.Errorf("failed to run init command: %w %s", err, resp)
+		return fmt.Errorf("failed to run init command: cmd=%q err=%w resp=%q", command.String(), err, resp)
 	}
 
 	if strings.Trim(resp, " \n") != "success" {
-		return fmt.Errorf("init command failed: %s", resp)
+		return fmt.Errorf("init command failed: cmd=%q resp=%q", command.String(), resp)
 	}
 
 	return nil
@@ -177,108 +164,40 @@ func (t *Team) runInitCommand(game *AttackDefenseGame, target TargetInfo) error 
 
 func (t *Team) Start(game *AttackDefenseGame) error {
 	// Start the team instance.
-	inst, err := game.StartInstanceFromConfig("team_"+t.DisplayName, t.IP(), game.Config.Vulnbox.InstanceConfig, t.ID)
+	inst, err := game.StartTeamInstanceFromConfig("team_"+t.DisplayName, t.IP(), game.Config.Vulnbox.InstanceConfig, *t, game.Config.Vulnbox.InitTemplate, game.Config.Vulnbox.Services)
 	if err != nil {
 		return err
 	}
+	game.instanceMutex.Lock()
 	game.teamInstances[t.ID] = len(game.instances) - 1
-
-	if err := inst.ParseFlows(func(s string) (string, error) {
-		if s == "team" {
-			return t.DisplayName, nil
-		} else {
-			return "", fmt.Errorf("invalid flow variable: %s", s)
-		}
-	}); err != nil {
-		return fmt.Errorf("failed to parse flows for team (%d): %w", t.ID, err)
-	}
-
-	for _, service := range game.Config.Vulnbox.Services {
-		inst.AddService(&service)
-	}
-
-	// Run the init command.
-	if err := t.runInitCommand(game, t.Info()); err != nil {
-		return fmt.Errorf("failed to run init command for team: %w", err)
-	}
+	game.instanceMutex.Unlock()
 
 	// Run a health check.
 	if game.Config.Vulnbox.HealthCheck.Kind != HealthCheckKindNone {
-		if err := inst.HealthCheck(game.Config.Vulnbox.HealthCheck, func(tpl string) (string, error) {
-			t, err := template.New("health_check").Parse(tpl)
-			if err != nil {
-				return "", err
-			}
-
-			var buf strings.Builder
-
-			if err := t.Execute(&buf, &struct {
-				IP string
-			}{
-				IP: inst.InstanceAddress().String(),
-			}); err != nil {
-				return "", err
-			}
-
-			return buf.String(), nil
-		}); err != nil {
+		if err := inst.HealthCheck(game.Config.Vulnbox.HealthCheck); err != nil {
 			return fmt.Errorf("failed to run health check for team: %w", err)
 		}
 	}
 
 	// If there is a bot, start the bot instance.
 	if game.Config.Vulnbox.Bot.Enabled {
-		inst, err := game.StartInstanceFromConfig("team_"+t.DisplayName+"_bot", t.BotIP(), game.Config.Vulnbox.Bot.InstanceConfig, t.ID)
+		_, err := game.StartTeamInstanceFromConfig("team_"+t.DisplayName+"_bot", t.BotIP(), game.Config.Vulnbox.Bot.InstanceConfig, *t, game.Config.Vulnbox.InitTemplate, game.Config.Vulnbox.Services)
 		if err != nil {
 			return err
 		}
+		game.instanceMutex.Lock()
 		game.botInstances[t.ID] = len(game.instances) - 1
-
-		if err := inst.ParseFlows(func(s string) (string, error) {
-			if s == "team" {
-				return t.DisplayName, nil
-			} else {
-				return "", fmt.Errorf("invalid flow variable: %s", s)
-			}
-		}); err != nil {
-			return fmt.Errorf("failed to parse flows for team (%d): %w", t.ID, err)
-		}
-
-		for _, service := range game.Config.Vulnbox.Services {
-			inst.AddService(&service)
-		}
-
-		// Run the init command.
-		if err := t.runInitCommand(game, t.BotInfo()); err != nil {
-			return fmt.Errorf("failed to run init command for bot: %w", err)
-		}
+		game.instanceMutex.Unlock()
 	}
 
 	// Start the soc instance.
-	inst, err = game.StartInstanceFromConfig("team_"+t.DisplayName+"_soc", t.SocIP(), game.Config.Socbox.InstanceConfig, t.ID)
+	_, err = game.StartTeamInstanceFromConfig("team_"+t.DisplayName+"_soc", t.SocIP(), game.Config.Socbox.InstanceConfig, *t, game.Config.Socbox.InitTemplate, game.Config.Socbox.Services)
 	if err != nil {
 		return err
 	}
+	game.instanceMutex.Lock()
 	game.socInstances[t.ID] = len(game.instances) - 1
-
-	if err := inst.ParseFlows(func(s string) (string, error) {
-		if s == "team" {
-			return t.DisplayName, nil
-		} else {
-			return "", fmt.Errorf("invalid flow variable: %s", s)
-		}
-	}); err != nil {
-		return fmt.Errorf("failed to parse flows for soc (%d): %w", t.SocId(), err)
-	}
-
-	for _, service := range game.Config.Socbox.Services {
-		inst.AddService(&service)
-	}
-
-	// Run the init command.
-	if err := t.runInitCommand(game, t.SocInfo()); err != nil {
-		return fmt.Errorf("failed to run init command for soc: %w", err)
-	}
+	game.instanceMutex.Unlock()
 
 	return nil
 }

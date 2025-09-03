@@ -7,7 +7,8 @@ vulnbox:
   # The template is a TinyRange configuration file that describes the vulnbox.
   template: vulnbox/vulnbox.yml
 
-  init: python3 /root/init.py {{ .IP }} {{ .TeamName }}
+  init: python3 /root/init.py {{ .IP }} '{{ .TeamName }}'
+  # init: echo success
 
   health_check:
     kind: http
@@ -85,7 +86,7 @@ socbox:
   flows:
     - public/*:public
     - team/*:public
-    - team/{team}:private
+    - team/{team}:*
     - bot/{team}:public
 
   tags:
@@ -115,7 +116,7 @@ device:
   flows:
     - public/*:public
     - team/*:public
-    - team/{team}:private
+    - team/{team}:*
     - bot/{team}:public
 
 scorebot:
