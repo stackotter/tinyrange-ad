@@ -417,7 +417,7 @@ func (game *AttackDefenseGame) StartTeamInstanceFromConfig(name string, ip strin
 		return nil, fmt.Errorf("failed to parse flows for team (%d): %w", team.ID, err)
 	}
 
-	for _, service := range game.Config.Vulnbox.Services {
+	for _, service := range services {
 		inst.AddService(&service)
 	}
 
