@@ -167,8 +167,8 @@ type AttackDefenseGame struct {
 	// Error that caused termination of game
 	Error error
 
-	publicServer  *http.Server
-	privateServer *http.ServeMux
+	publicServerMux *http.ServeMux
+	publicServer    *http.Server
 
 	rebuildTemplates bool
 
@@ -276,14 +276,14 @@ func (game *AttackDefenseGame) teamFromTag(tag string) (team *Team, bot bool, er
 	return nil, false, fmt.Errorf("team not found: %s", tag)
 }
 
-func (game *AttackDefenseGame) flagsStolenBy(info TargetInfo, serviceId int) []FlagInfo {
+func (game *AttackDefenseGame) flagsStolenBy(teamId int, serviceId int) []FlagInfo {
 	return append(
-		game.OverallState.Teams[info.ID].Services[serviceId].StolenFlags,
-		game.CurrentState.Teams[info.ID].Services[serviceId].StolenFlags...,
+		game.OverallState.Teams[teamId].Services[serviceId].StolenFlags,
+		game.CurrentState.Teams[teamId].Services[serviceId].StolenFlags...,
 	)
 }
 
-func (game *AttackDefenseGame) submitFlag(info TargetInfo, flag string) FlagStatus {
+func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) FlagStatus {
 	if game.RunningState.Load() != RunningStateStarted {
 		return GameNotRunning
 	}
@@ -299,7 +299,7 @@ func (game *AttackDefenseGame) submitFlag(info TargetInfo, flag string) FlagStat
 		return InvalidFlag
 	}
 
-	if teamId == info.ID {
+	if teamId == submittingTeamId {
 		return FlagFromOwnTeam
 	}
 
@@ -316,20 +316,18 @@ func (game *AttackDefenseGame) submitFlag(info TargetInfo, flag string) FlagStat
 	}
 
 	// Check if the flag has already been stolen.
-	for _, stolen := range game.flagsStolenBy(info, serviceId) {
+	for _, stolen := range game.flagsStolenBy(submittingTeamId, serviceId) {
 		if stolen.TeamId == teamId && stolen.TickId == tickId {
 			return FlagAlreadyStolen
 		}
 	}
 
-	slog.Info("flag accepted", "team", info.Name, "target", teamId, "service", serviceId, "tick", tickId)
-
-	ownService := game.CurrentState.Teams[info.ID].Services[serviceId]
+	ownService := game.CurrentState.Teams[submittingTeamId].Services[serviceId]
 	ownService.StolenFlags = append(ownService.StolenFlags, FlagInfo{TeamId: teamId, TickId: tickId})
 
 	otherService := game.CurrentState.Teams[teamId].Services[serviceId]
 
-	otherService.LostFlags = append(otherService.LostFlags, FlagInfo{TeamId: info.ID, TickId: tickId})
+	otherService.LostFlags = append(otherService.LostFlags, FlagInfo{TeamId: submittingTeamId, TickId: tickId})
 
 	return FlagAccepted
 }
@@ -1032,12 +1030,7 @@ func (game *AttackDefenseGame) Run() error {
 		return fmt.Errorf("failed to start server: %w", err)
 	}
 
-	// Register the routes for the internal server.
-	if err := game.registerPrivateServer(); err != nil {
-		return fmt.Errorf("failed to register internal server: %w", err)
-	}
-
-	// Register the internal services.
+	// Register the services on wireguard player network.
 	if err := game.registerInternalServices(); err != nil {
 		return fmt.Errorf("failed to register internal services: %w", err)
 	}

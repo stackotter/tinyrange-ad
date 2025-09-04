@@ -11,6 +11,10 @@ import (
 	"strings"
 )
 
+const (
+	CONTEXT_KEY_TEAM CONTEXT_KEY = "team"
+)
+
 type singleListener struct {
 	addr net.Addr
 	conn net.Conn
@@ -108,7 +112,7 @@ func (game *AttackDefenseGame) registerInternalServices() error {
 			for scanner.Scan() {
 				flag := scanner.Text()
 
-				status := game.submitFlag(info, flag)
+				status := game.submitFlag(info.ID, flag)
 
 				if status != FlagAccepted {
 					slog.Info("received invalid flag", "team", info.Name, "flag", flag, "status", status)
@@ -141,7 +145,7 @@ func (game *AttackDefenseGame) registerInternalServices() error {
 				BaseContext: func(l net.Listener) context.Context {
 					return context.WithValue(context.Background(), CONTEXT_KEY_TEAM, info)
 				},
-				Handler: game.privateServer,
+				Handler: game.publicServerMux,
 			}
 
 			// Serve only a single connection.

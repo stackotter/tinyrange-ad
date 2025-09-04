@@ -35,7 +35,7 @@ func Card(body ...htm.Fragment) htm.Fragment {
 	var childList []htm.Fragment
 	childList = append(childList, htm.Class("card-body"))
 	childList = append(childList, body...)
-	return html.Div(htm.Class("card"),
+	return html.Div(htm.Class("card"), htm.Class("mt-3"),
 		html.Div(childList...),
 	)
 }
@@ -199,7 +199,7 @@ func FormField(label string, name string, opts html.FormOptions, children ...htm
 			),
 		)
 	} else {
-		return html.Div(Row, htm.Class("mb-3"),
+		return html.Div(htm.Class("mb-3"),
 			html.Label(fieldId, label, htm.Class("form-label")),
 			input,
 		)

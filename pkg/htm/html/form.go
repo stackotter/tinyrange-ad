@@ -6,7 +6,10 @@ import (
 	"github.com/tinyrange/ad/pkg/htm"
 )
 
-func Form(children ...htm.Fragment) htm.Fragment { return htm.NewHtmlFragment("form", children...) }
+func Form(children ...htm.Fragment) htm.Fragment {
+	children = append(children, htm.Attr("style", "margin: 0"))
+	return htm.NewHtmlFragment("form", children...)
+}
 func FormTarget(method string, target string) htm.Fragment {
 	return htm.Group{
 		htm.Attr("method", method),

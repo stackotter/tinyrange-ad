@@ -26,6 +26,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type flagIdApiResponse struct {
+	Tick    int    `json:"tick"`
+	Team    int    `json:"team"`
+	Service int    `json:"service"`
+	Value   string `json:"value"`
+}
+
+type serviceApiResponse struct {
+	Id   int    `json:"id"`
+	Name string `json:"name"`
+	Port int    `json:"port"`
+}
+
+type teamApiResponse struct {
+	Self bool   `json:"self"`
+	Id   int    `json:"id"`
+	IP   string `json:"ip"`
+	Name string `json:"name"`
+}
+
 func (game *AttackDefenseGame) requireAuthentication(w http.ResponseWriter, r *http.Request) (User, Team, error) {
 	cookie, err := r.Cookie("session")
 	if err != nil {
@@ -232,8 +252,7 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 	if user != nil && game.isAdmin(*user) {
 		navitems = append(navitems,
 			bootstrap.NavbarLink("/game", html.Text("Game")),
-			bootstrap.NavbarLink("/events", html.Text("Events")),
-			bootstrap.NavbarLink("/config", html.Text("Config")),
+			// bootstrap.NavbarLink("/events", html.Text("Events")),
 		)
 	}
 
@@ -247,7 +266,13 @@ func (game *AttackDefenseGame) publicPageLayout(title string, user *User, body .
 			bootstrap.NavbarLink("/teams", html.Text("Teams")),
 			bootstrap.NavbarLink("/devices", html.Text("Devices")),
 			bootstrap.NavbarLink("/instances", html.Text("Instances")),
-			bootstrap.NavbarLink("/team", html.Text("Team")),
+		)
+
+		if !game.isAdmin(*user) {
+			navitems = append(navitems, bootstrap.NavbarLink("/team", html.Text("Team")))
+		}
+
+		navitems = append(navitems,
 			bootstrap.NavbarLink("/profile", html.Text("Profile")),
 			bootstrap.NavbarLink("/logout", html.Text("Log out")),
 		)
@@ -360,6 +385,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		}
 
 		var instanceList []htm.Fragment
+		instanceList = append(instanceList, bootstrap.CardTitle("Instances"))
 
 		for _, instance := range instances {
 			instanceList = append(instanceList, html.Div(
@@ -375,15 +401,22 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			instanceList = append(instanceList, html.Text("No instances"))
 		}
 
-		page := game.publicPageLayout("Instances", &user, instanceList...)
+		page := game.publicPageLayout("Instances", &user,
+			bootstrap.Card(instanceList...),
+		)
 
 		err := htm.Render(r.Context(), w, page)
 		return err
 	}))
 
-	// GET /teams lists all teams.
+	// GET /game displays game management interface
 	handler.HandleFunc("GET /game", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		var content []htm.Fragment
+		content = append(content,
+			html.Div(htm.Class("mb-4"),
+				bootstrap.CardTitle("Manage game"),
+			),
+		)
 
 		runningState := game.RunningState.Load()
 		if runningState == RunningStateStarted {
@@ -409,13 +442,14 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			}
 		}
 
+		content = []htm.Fragment{bootstrap.Card(content...)}
 		page := game.publicPageLayout("Game", &user, content...)
 
 		err := htm.Render(r.Context(), w, page)
 		return err
 	}))
 
-	// GET /teams lists all teams.
+	// POST /api/game/start starts the game
 	handler.HandleFunc("POST /api/game/start", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		go func() {
 			if err := game.Start(); err != nil {
@@ -432,40 +466,75 @@ func (game *AttackDefenseGame) startPublicServer() error {
 	handler.HandleFunc("GET /teams", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		isAdmin := game.isAdmin(user)
 
-		var teamList []htm.Fragment
 		var teams []*Team
 		teams = slices.AppendSeq(teams, maps.Values(game.Teams))
-		slices.SortFunc(teams, func(i *Team, j *Team) int {
-			if i.ID < j.ID {
-				return -1
-			} else if i.ID > j.ID {
-				return 1
-			} else {
-				return 0
-			}
+		slices.SortFunc(teams, func(a *Team, b *Team) int {
+			return a.ID - b.ID
 		})
+
+		var headerRow htm.Group
+		headerRow = append(headerRow, htm.Text("Name"))
+		if game.isAdmin(user) {
+			headerRow = append(headerRow, htm.Text("Join token"))
+		}
+		headerRow = append(headerRow, htm.Text("IP"))
+
+		for _, service := range game.Config.Vulnbox.Services {
+			headerRow = append(headerRow, htm.Text(service.Name()))
+		}
+
+		for _, service := range game.Config.Socbox.Services {
+			headerRow = append(headerRow, html.Text(service.Name()))
+		}
+
+		var teamList []htm.Group
 		for _, team := range teams {
-			if team.IsAdmin() && !game.isAdmin(user) {
+			if team.IsAdmin() && !isAdmin {
 				continue
 			}
-			var lines []htm.Fragment
-			lines = append(lines, bootstrap.CardTitle(team.DisplayName))
-			if !team.IsAdmin() {
-				lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("IP: %s", team.IP())))
-			}
+
+			row := htm.Group{htm.Text(team.DisplayName)}
+
 			if isAdmin {
-				lines = append(lines, bootstrap.CardTitle(fmt.Sprintf("Join token: %s", team.JoinToken)))
+				row = append(row, htm.Text(team.JoinToken))
 			}
-			teamList = append(teamList, html.Div(bootstrap.Card(lines...)))
+
+			if !team.IsAdmin() {
+				row = append(row, htm.Text(team.IP()))
+
+				for _, service := range game.Config.Vulnbox.Services {
+					serviceUrl := fmt.Sprintf("http://%s:%d", team.IP(), service.Port())
+					row = append(row, html.Link(serviceUrl, html.Textf("%s", serviceUrl)))
+				}
+
+				for _, service := range game.Config.Socbox.Services {
+					serviceUrl := fmt.Sprintf("http://%s:%d", team.SocIP(), service.Port())
+					row = append(row, html.Link(serviceUrl, html.Textf("%s", serviceUrl)))
+				}
+			} else {
+				for _ = range len(game.Config.Vulnbox.Services) + len(game.Config.Socbox.Services) + 1 {
+					row = append(row, html.Text("~"))
+				}
+			}
+
+			teamList = append(teamList, row)
 		}
 
 		var content []htm.Fragment
-		content = append(content, html.Div(teamList...))
+		content = append(content,
+			bootstrap.Card(
+				bootstrap.CardTitle("Teams"),
+				bootstrap.Table(
+					headerRow,
+					teamList,
+				),
+			),
+		)
 
 		if isAdmin && game.RunningState.Load() == RunningStateStopped {
 			content = append(content,
-				html.P(
-					html.H2(htm.Text("Create team")),
+				bootstrap.Card(
+					bootstrap.CardTitle("Create team"),
 					html.Form(
 						html.FormTarget("POST", "/api/team"),
 						bootstrap.FormField("Name", "name", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Name"}),
@@ -625,8 +694,8 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 		page := game.publicPageLayout("Devices", &user,
 			html.Div(deviceList...),
-			html.P(
-				html.H2(htm.Text("Add device")),
+			bootstrap.Card(
+				bootstrap.CardTitle("Add device"),
 				html.Form(
 					html.FormTarget("POST", "/api/device"),
 					bootstrap.FormField("Name", "name", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Device Name"}),
@@ -662,7 +731,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		}
 
 		page := game.publicPageLayout("Register", user,
-			html.H1(html.Text("Register")),
+			html.H2(html.Text("Register")),
 			html.Form(
 				html.FormTarget("POST", "/register"),
 				bootstrap.FormField("Team token", "teamToken", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Team token"}),
@@ -740,7 +809,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		}
 
 		page := game.publicPageLayout("Log in", user,
-			html.H1(html.Text("Log in")),
+			html.H2(html.Text("Log in")),
 			html.Form(
 				html.FormTarget("POST", "/login"),
 				bootstrap.FormField("Username", "username", html.FormOptions{Kind: html.FormFieldText, Required: true, Value: "", Placeholder: "Username"}),
@@ -820,9 +889,12 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 	handler.HandleFunc("GET /profile", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		page := game.publicPageLayout("Profile", &user,
-			html.Div(
-				html.Div(html.Textf("Username: %s", user.Username)),
-				html.Div(html.Textf("Team: %s", team.DisplayName)),
+			bootstrap.Card(
+				bootstrap.CardTitle("Profile"),
+				html.Div(
+					html.Div(html.Textf("Username: %s", user.Username)),
+					html.Div(html.Textf("Team: %s", team.DisplayName)),
+				),
 			),
 		)
 
@@ -870,42 +942,6 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		return err
 	}))
 
-	// // DELETE /api/device/{ip} deletes a device.
-	// handler.HandleFunc("DELETE /api/device/{ip}", func(w http.ResponseWriter, r *http.Request) {
-	// 	if !game.checkForAdmin(w, r) {
-	// 		return
-	// 	}
-
-	// 	ip := r.PathValue("ip")
-
-	// 	if err := game.RemoveDevice(ip); err != nil {
-	// 		slog.Error("failed to remove device", "err", err)
-	// 		if err := htm.Render(r.Context(), w, game.publicPageError(err, user)); err != nil {
-	// 			slog.Error("failed to render page", "err", err)
-	// 		}
-	// 		return
-	// 	}
-
-	// 	http.Redirect(w, r, "/devices", http.StatusFound)
-	// })
-
-	// GET /config lists the current YAML configuration and provides a button to download it.
-	handler.HandleFunc("GET /config", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
-		config, err := yaml.Marshal(&game.Config)
-		if err != nil {
-			slog.Error("failed to marshal config", "err", err)
-			http.Error(w, "failed to marshal config", http.StatusInternalServerError)
-			return nil
-		}
-
-		err = htm.Render(r.Context(), w,
-			game.publicPageLayout("Config", &user,
-				html.Pre(html.Code(html.Textf("%s", config))),
-			),
-		)
-		return err
-	}))
-
 	// GET /api/config downloads the current YAML configuration.
 	handler.HandleFunc("GET /api/config", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
 		w.Header().Set("Content-Type", "application/yaml")
@@ -921,13 +957,39 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 	// GET /scoreboard lists the scoreboard for the overall state.
 	handler.HandleFunc("GET /scoreboard", game.route(func(w http.ResponseWriter, r *http.Request, user *User, team *Team) error {
-		page := game.renderScoreboard()
-		if page == nil {
-			return fmt.Errorf("game has not started")
-		} else {
-			page = game.publicPageLayout("Scoreboard", user, page)
+		scoreboard := game.renderScoreboard()
+		if scoreboard == nil {
+			scoreboard = htm.Text("game has not started")
 		}
 
+		content := []htm.Fragment{
+			bootstrap.Card(
+				bootstrap.CardTitle("Scoreboard"),
+				scoreboard,
+			),
+		}
+
+		if user != nil && !game.isAdmin(*user) {
+			content = append(content,
+				bootstrap.Card(
+					bootstrap.CardTitle("Submit Flag"),
+					html.Form(
+						html.Id("flag-form"),
+						htmx.Post("/api/flag"),
+						htmx.Target("flag-result"),
+						bootstrap.FormField("Flag", "flag", html.FormOptions{
+							Kind:     html.FormFieldText,
+							Required: true,
+							Value:    "",
+						}),
+						bootstrap.SubmitButton("Submit", bootstrap.ButtonColorPrimary),
+					),
+					html.Div(html.Id("flag-result")),
+				),
+			)
+		}
+
+		page := game.publicPageLayout("Scoreboard", user, content...)
 		err := htm.Render(r.Context(), w, page)
 		return err
 	}))
@@ -967,6 +1029,86 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		return err
 	}))
 
+	handler.HandleFunc("GET /api/teams", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, playerTeam Team) error {
+		teams := make([]teamApiResponse, len(game.PlayerTeams()))
+
+		for i, team := range game.PlayerTeams() {
+			teams[i] = teamApiResponse{
+				Self: team.ID == playerTeam.ID,
+				Id:   team.ID,
+				IP:   team.IP(),
+				Name: team.DisplayName,
+			}
+		}
+
+		json.NewEncoder(w).Encode(teams)
+		return nil
+	}))
+
+	handler.HandleFunc("GET /api/vulnbox/services", func(w http.ResponseWriter, r *http.Request) {
+		services := make([]serviceApiResponse, len(game.Config.Vulnbox.PublicServices()))
+		for i, service := range game.Config.Vulnbox.PublicServices() {
+			services[i] = serviceApiResponse{
+				Id:   service.Id,
+				Name: service.Name(),
+				Port: service.Port(),
+			}
+		}
+
+		json.NewEncoder(w).Encode(services)
+	})
+
+	// An endpoint for submitting flags.
+	handler.HandleFunc("POST /api/flag", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		flag := r.FormValue("flag")
+		if flag == "" {
+			http.Error(w, "flag not found", http.StatusBadRequest)
+			return nil
+		}
+
+		status := game.submitFlag(team.ID, flag)
+
+		fmt.Fprintf(w, "%s\n", status)
+		return nil
+	}))
+
+	// An API endpoint for listing current flag ids.
+	handler.HandleFunc("GET /api/flagIds", func(w http.ResponseWriter, r *http.Request) {
+		flagIds := make([]flagIdApiResponse, 0)
+		for _, team := range game.PlayerTeams() {
+			// Iterate through services with scorebot checks (those are the ones with flags)
+			for _, serviceCheck := range game.Config.ScoreBot.Checks {
+				service := game.Config.Vulnbox.GetService(serviceCheck.Id)
+				if service == nil {
+					http.Error(w, fmt.Sprintf("check %d doesn't have corresponding service", serviceCheck.Id), http.StatusInternalServerError)
+					return
+				}
+
+				// Iterate through past few ticks. Exclude current tick because it may or may
+				// not have been inserted yet and we want to avoid leaking flag ids before
+				// they're used (otherwise people can create accounts with the same name on other
+				// teams' vulnboxes before the scorebot gets around to it).
+				for tickOffset := range game.FlagValidTicks() - 1 {
+					if tickOffset >= game.CurrentTick-1 {
+						continue
+					}
+					tickId := int(game.CurrentTick - tickOffset - 1)
+					flag := game.FlagGen.Generate(tickId, team.ID, service.Id, game.Signer)
+					flagId := flagIdApiResponse{
+						Tick:    tickId,
+						Team:    team.ID,
+						Service: service.Id,
+						Value:   GetFlagId(flag),
+					}
+					flagIds = append(flagIds, flagId)
+				}
+			}
+		}
+
+		json.NewEncoder(w).Encode(flagIds)
+		return
+	})
+
 	for path, pageInfo := range game.Config.Pages {
 		if path == "/" {
 			continue
@@ -990,6 +1132,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 
 	listenAddr := fmt.Sprintf("%s:%d", game.ListenIP, game.PublicPort)
 
+	game.publicServerMux = handler
 	game.publicServer = &http.Server{
 		Addr:    listenAddr,
 		Handler: handler,
