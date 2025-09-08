@@ -181,6 +181,12 @@ func appMain() error {
 		return err
 	}
 
+	// Restore current tick, scoreboard and flag signing key
+	err = game.RestorePersistentState()
+	if err != nil {
+		return err
+	}
+
 	if err := game.Run(); err != nil {
 		return err
 	}

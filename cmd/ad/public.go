@@ -411,17 +411,33 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		if runningState == RunningStateStarted {
 			content = append(content,
 				html.P(htm.Text("Game is running")),
-				html.P(html.Textf("Tick %d out of %d", game.CurrentTick, game.TotalTicks())),
 			)
 		} else if runningState == RunningStateStarting {
 			content = append(content,
 				html.P(htm.Text("Game is starting")),
 			)
-		} else {
+		} else if runningState == RunningStateResetting {
 			content = append(content,
-				html.Form(
-					html.FormTarget("POST", "/api/game/start"),
-					bootstrap.SubmitButton("Start", bootstrap.ButtonColorPrimary),
+				html.P(htm.Text("Game is resetting")),
+			)
+		}
+
+		content = append(content,
+			html.P(html.Textf("Tick %d out of %d", game.CurrentTick, game.TotalTicks())),
+		)
+
+		if runningState == RunningStateStopped {
+			content = append(content,
+				html.Div(
+					htm.Attr("style", "display: flex; gap: 1rem"),
+					html.Form(
+						html.FormTarget("POST", "/api/game/start"),
+						bootstrap.SubmitButton("Start", bootstrap.ButtonColorPrimary),
+					),
+					html.Form(
+						html.FormTarget("POST", "/api/game/reset"),
+						bootstrap.SubmitButton("Reset", bootstrap.ButtonColorDanger),
+					),
 				),
 			)
 			if game.Error != nil {
@@ -446,6 +462,17 @@ func (game *AttackDefenseGame) startPublicServer() error {
 				game.Error = err
 			}
 		}()
+
+		http.Redirect(w, r, "/game", http.StatusFound)
+		return nil
+	}))
+
+	// POST /api/game/reset resets the game
+	handler.HandleFunc("POST /api/game/reset", game.adminRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+		if err := game.Reset(); err != nil {
+			slog.Error("Failed to reset game", "err", err)
+			game.Error = err
+		}
 
 		http.Redirect(w, r, "/game", http.StatusFound)
 		return nil
@@ -1056,9 +1083,12 @@ func (game *AttackDefenseGame) startPublicServer() error {
 			return nil
 		}
 
-		status := game.submitFlag(team.ID, flag)
-
-		fmt.Fprintf(w, "%s\n", status)
+		status, err := game.submitFlag(team.ID, flag)
+		if err != nil {
+			fmt.Fprintf(w, "Error (%v)\n", err)
+		} else {
+			fmt.Fprintf(w, "%s\n", status)
+		}
 		return nil
 	}))
 

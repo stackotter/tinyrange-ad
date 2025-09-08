@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -34,15 +36,69 @@ func CreateDatabaseConnection(file string) (*PersistDatabase, error) {
 		return nil, fmt.Errorf("failed to generate admin team join token: %v", err)
 	}
 
+	flagKey, err := GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate flag signing key: %v", err)
+	}
+
 	sqlStmt := `
-	create table teams (id integer not null primary key, name text not null, join_token text not null);
-	create table users (id integer not null primary key, team integer not null, username text not null, password_hash text not null);
-	create table devices (id integer not null primary key, user integer not null, name text not null, config text);
-	create table instances (id integer not null primary key, team integer not null, name text not null, ssh_config text not null);
-	create table sessions (id integer not null primary key, user integer not null, token text not null, expires_at integer not null);
+	create table teams (
+		id integer not null primary key,
+		name text not null,
+		join_token text not null
+	);
+	create table users (
+		id integer not null primary key,
+		team integer not null,
+		username text not null,
+		password_hash text not null
+	);
+	create table devices (
+		id integer not null primary key,
+		user integer not null,
+		name text not null,
+		config text
+	);
+	create table instances (
+		id integer not null primary key,
+		team integer not null,
+		name text not null,
+		ssh_config text not null
+	);
+	create table sessions (
+		id integer not null primary key,
+		user integer not null,
+		token text not null,
+		expires_at integer not null
+	);
+	create table state (
+		tick integer not null,
+		flag_key blob not null
+	);
+	create table flag_steals (
+		id integer not null primary key,
+		attacking_team integer not null,
+		defending_team integer not null,
+		service integer not null,
+		steal_tick integer not null,
+		flag_tick integer not null,
+		time integer not null
+	);
+	create table uptime_checks (
+		id integer not null primary key,
+		team integer not null,
+		service integer not null,
+		tick integer not null,
+		start_time integer not null,
+		duration real not null,
+		success integer not null,
+		failure_reason text
+	);
+
+	insert into state(tick, flag_key) values(1, ?);
 	insert into teams(name, join_token) values('admin', ?);
 	`
-	_, err = db.conn.Exec(sqlStmt, adminJoinToken)
+	_, err = db.conn.Exec(sqlStmt, flagKey.PrivateKey, adminJoinToken)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("Failed to create tables: %v", err)
@@ -151,6 +207,76 @@ func (db *PersistDatabase) queryOne(query string, args ...interface{}) (*sql.Row
 	return row, nil
 }
 
+type PersistentState struct {
+	Tick    int64
+	FlagKey ed25519.PrivateKey
+}
+
+func (db *PersistDatabase) GetPersistentState() (PersistentState, error) {
+	row, err := db.queryOne("select tick, flag_key from state")
+	if err != nil {
+		return PersistentState{}, err
+	}
+
+	var tick int64
+	var flagKey []byte
+	err = row.Scan(&tick, &flagKey)
+	if err != nil {
+		return PersistentState{}, err
+	}
+
+	return PersistentState{
+		Tick:    tick,
+		FlagKey: flagKey,
+	}, nil
+}
+
+func (db *PersistDatabase) UpdatePersistentState(state PersistentState) error {
+	_, err := db.exec("update state set tick=?, flag_key=?", state.Tick, state.FlagKey)
+	return err
+}
+
+func (db *PersistDatabase) ResetPersistentState() error {
+	flagKey, err := GenerateKey()
+	if err != nil {
+		return fmt.Errorf("failed to generate flag signing key: %v", err)
+	}
+
+	err = db.UpdatePersistentState(PersistentState{Tick: 1, FlagKey: flagKey.PrivateKey})
+	return err
+}
+
+func (db *PersistDatabase) UpdateTick(tick int64) error {
+	_, err := db.exec("update state set tick=?", tick)
+	return err
+}
+
+func (db *PersistDatabase) InsertFlagSteal(steal *Steal) (int, error) {
+	id, err := db.exec(
+		"insert into flag_steals(attacking_team, defending_team, service, steal_tick, flag_tick, time) values(?, ?, ?, ?, ?, ?)",
+		steal.AttackingTeamID, steal.Flag.TeamId, steal.Flag.ServiceId, steal.StealTick, steal.StealTime.Unix(),
+	)
+	if err != nil {
+		return id, err
+	}
+
+	steal.ID = id
+	return id, nil
+}
+
+func (db *PersistDatabase) InsertUptimeCheck(check *UptimeCheck) (int, error) {
+	id, err := db.exec(
+		"insert into uptime_checks(team, service, tick, start_time, duration, success, failure_reason) values(?, ?, ?, ?, ?, ?, ?)",
+		check.TeamID, check.ServiceID, check.TickID, check.StartTime.Unix(), check.Duration, check.Success, check.FailureReason,
+	)
+	if err != nil {
+		return id, err
+	}
+
+	check.ID = id
+	return id, nil
+}
+
 func (db *PersistDatabase) GetUserByUsername(username string) (User, error) {
 	row, err := db.queryOne("select id, team, password_hash from users where username=?", username)
 	if err != nil {
@@ -231,9 +357,27 @@ func (db *PersistDatabase) GetTeam(id int) (Team, error) {
 func (db *PersistDatabase) DeleteSessionByToken(token string) error {
 	_, err := db.exec("delete from sessions where token=?", token)
 	if err != nil {
+		slog.Error("Failed to get session by token", "err", err)
 		return fmt.Errorf("Failed to get session by token")
 	}
+	return nil
+}
 
+func (db *PersistDatabase) RemoveAllFlagSteals() error {
+	_, err := db.exec("delete from flag_steals")
+	if err != nil {
+		slog.Error("Failed to remove all flag steals", "err", err)
+		return fmt.Errorf("Failed to remove all flag steals")
+	}
+	return nil
+}
+
+func (db *PersistDatabase) RemoveAllUptimeChecks() error {
+	_, err := db.exec("delete from uptime_checks")
+	if err != nil {
+		slog.Error("Failed to remove all uptime checks", "err", err)
+		return fmt.Errorf("Failed to remove all uptime checks")
+	}
 	return nil
 }
 
@@ -326,6 +470,71 @@ func (db *PersistDatabase) ForEachInstance(cb func(user Instance) error) error {
 				return fmt.Errorf("Failed to scan query result row: %v", err)
 			}
 			if err := cb(Instance{id, team, name, sshConfig}); err != nil {
+				return err
+			}
+			return nil
+		},
+	)
+}
+
+func (db *PersistDatabase) ForEachFlagSteal(cb func(steal Steal) error) error {
+	return db.queryForEach(
+		"select id, attacking_team, defending_team, service, steal_tick, flag_tick, time from flag_steals",
+		func(rows *sql.Rows) error {
+			var id int
+			var attackingTeam int
+			var defendingTeam int
+			var service int
+			var stealTick int
+			var flagTick int
+			var stealTime int64
+			err := rows.Scan(&id, &attackingTeam, &defendingTeam, &service, &stealTick, &flagTick, &stealTime)
+			if err != nil {
+				return fmt.Errorf("Failed to scan query result row: %v", err)
+			}
+
+			flag := FlagInfo{TeamId: defendingTeam, TickId: flagTick, ServiceId: service}
+			if err := cb(Steal{
+				ID:              id,
+				Flag:            flag,
+				AttackingTeamID: attackingTeam,
+				StealTick:       stealTick,
+				StealTime:       time.Unix(stealTime, 0),
+			}); err != nil {
+				return err
+			}
+			return nil
+		},
+	)
+}
+
+func (db *PersistDatabase) ForEachUptimeCheck(cb func(check UptimeCheck) error) error {
+	return db.queryForEach(
+		"select id, team, service, tick, start_time, duration, success, failure_reason from uptime_checks",
+		func(rows *sql.Rows) error {
+			var id int
+			var team int
+			var service int
+			var tick int
+			var startTime int64
+			var duration float64
+			var success bool
+			var failureReason *string
+			err := rows.Scan(&id, &team, &service, &tick, &startTime, &duration, &success, &failureReason)
+			if err != nil {
+				return fmt.Errorf("Failed to scan query result row: %v", err)
+			}
+
+			if err := cb(UptimeCheck{
+				ID:            id,
+				TeamID:        team,
+				ServiceID:     service,
+				TickID:        tick,
+				StartTime:     time.Unix(startTime, 0),
+				Duration:      duration,
+				Success:       success,
+				FailureReason: failureReason,
+			}); err != nil {
 				return err
 			}
 			return nil

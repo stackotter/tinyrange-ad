@@ -112,13 +112,17 @@ func (game *AttackDefenseGame) registerInternalServices() error {
 			for scanner.Scan() {
 				flag := scanner.Text()
 
-				status := game.submitFlag(info.ID, flag)
+				status, err := game.submitFlag(info.ID, flag)
 
-				if status != FlagAccepted {
-					slog.Info("received invalid flag", "team", info.Name, "flag", flag, "status", status)
+				if err != nil {
+					slog.Error("failed to submit flag", "team", info.Name, "err", err)
+					fmt.Fprintf(conn, "Error (%v)\n", err)
+				} else {
+					if status != FlagAccepted {
+						slog.Info("received invalid flag", "team", info.Name, "flag", flag, "status", status)
+					}
+					fmt.Fprintf(conn, "%s\n", status)
 				}
-
-				fmt.Fprintf(conn, "%s\n", status)
 			}
 		},
 	}

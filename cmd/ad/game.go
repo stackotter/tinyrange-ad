@@ -266,9 +266,10 @@ type AttackDefenseGame struct {
 }
 
 const (
-	RunningStateStopped  int32 = 0
-	RunningStateStarting int32 = 1
-	RunningStateStarted  int32 = 2
+	RunningStateStopped   int32 = 0
+	RunningStateStarting  int32 = 1
+	RunningStateStarted   int32 = 2
+	RunningStateResetting int32 = 3
 )
 
 func (game *AttackDefenseGame) PlayerTeams() []*Team {
@@ -367,10 +368,12 @@ func (game *AttackDefenseGame) flagsStolenBy(teamId int, serviceId int) []FlagIn
 	return game.WorkingScoreboard.Teams[teamId].Services[serviceId].StolenFlags
 }
 
-func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) FlagStatus {
+func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) (FlagStatus, error) {
 	if game.RunningState.Load() != RunningStateStarted {
-		return GameNotRunning
+		return GameNotRunning, nil
 	}
+
+	stealTime := time.Now()
 
 	// Locking the mutex now ensures the flag is counted for the current tick.
 	// It also ensures that the flag is not counted twice.
@@ -380,41 +383,55 @@ func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) Fla
 
 	tickId, teamId, serviceId, ok := game.FlagGen.Verify(game.Signer.Public(), flag)
 	if !ok {
-		return InvalidFlag
+		return InvalidFlag, nil
 	}
 
 	if teamId == submittingTeamId {
-		return FlagFromOwnTeam
+		return FlagFromOwnTeam, nil
 	}
 
 	if serviceId < 0 || serviceId >= len(game.Config.Vulnbox.Services) {
-		return InvalidService
+		return InvalidService, nil
 	}
 
 	if int64(tickId) < game.CurrentTick-game.FlagValidTicks() {
-		return FlagExpired
+		return FlagExpired, nil
 	}
 
 	if int64(tickId) > game.CurrentTick {
-		return FlagNotYetValid
+		return FlagNotYetValid, nil
 	}
 
 	// Check if the flag has already been stolen.
 	for _, stolen := range game.flagsStolenBy(submittingTeamId, serviceId) {
 		if stolen.TeamId == teamId && stolen.TickId == tickId {
-			return FlagAlreadyStolen
+			return FlagAlreadyStolen, nil
 		}
 	}
 
-	ownService := game.WorkingScoreboard.Teams[submittingTeamId].Services[serviceId]
-	ownService.StolenFlags = append(ownService.StolenFlags,
-		FlagInfo{TeamId: teamId, TickId: tickId, ServiceId: serviceId},
-	)
+	flagInfo := FlagInfo{TeamId: teamId, TickId: tickId, ServiceId: serviceId}
 
-	loserService := game.WorkingScoreboard.Teams[teamId].Services[serviceId]
+	steal := Steal{
+		Flag:            flagInfo,
+		AttackingTeamID: submittingTeamId,
+		StealTick:       int(game.CurrentTick),
+		StealTime:       stealTime,
+	}
+
+	_, err := game.Persist.InsertFlagSteal(&steal)
+	if err != nil {
+		return FlagAccepted, fmt.Errorf("Failed to save flag steal to db: %v", err)
+	}
+
+	return FlagAccepted, nil
+}
+
+func (s *ScoreboardState) ProcessSteal(steal Steal) {
+	ownService := s.Teams[steal.AttackingTeamID].Services[steal.Flag.ServiceId]
+	ownService.StolenFlags = append(ownService.StolenFlags, steal.Flag)
+
+	loserService := s.Teams[steal.Flag.TeamId].Services[steal.Flag.ServiceId]
 	loserService.FlagsLost += 1
-
-	return FlagAccepted
 }
 
 func (game *AttackDefenseGame) cacheTinyRangeTemplate(templateFilename string, ram string) error {
@@ -709,13 +726,17 @@ func (game *AttackDefenseGame) updateScoreboard() {
 	game.DisplayedScoreboardSummary = game.WorkingScoreboard.Summarize(game.CurrentTick, game.Teams, game.Config.Scoring)
 }
 
-func (game *AttackDefenseGame) EndTick() {
+func (game *AttackDefenseGame) EndTick(persist bool) {
 	if game.CurrentTick >= game.TotalTicks() {
 		return
 	}
 
 	game.updateScoreboard()
 	game.CurrentTick += 1
+
+	if persist {
+		game.Persist.UpdateTick(game.CurrentTick)
+	}
 }
 
 func (game *AttackDefenseGame) StartTick() error {
@@ -760,22 +781,36 @@ func (game *AttackDefenseGame) StartTick() error {
 				success = false
 			}
 
+			duration := time.Since(start)
 			slog.Info("scorebot response",
 				"team", info.Name,
 				"service", service.Id,
 				"success", success,
 				"message", message,
-				"duration", time.Since(start),
+				"duration", duration,
 			)
+
+			failureReason := (*string)(nil)
+			if message != "" {
+				failureReason = &message
+			}
+			check := UptimeCheck{
+				TeamID:        info.ID,
+				ServiceID:     service.Id,
+				TickID:        tickId,
+				StartTime:     start,
+				Duration:      duration.Seconds(),
+				Success:       success,
+				FailureReason: failureReason,
+			}
+			_, err = game.Persist.InsertUptimeCheck(&check)
+			if err != nil {
+				return fmt.Errorf("Failed to save uptime check to db: %v", err)
+			}
 
 			// Update the service state.
 			game.scoreboardMtx.Lock()
-			serviceState := game.WorkingScoreboard.Teams[info.ID].Services[service.Id]
-			if success {
-				serviceState.SuccessfulUptimeChecks += 1
-			} else {
-				serviceState.FailedUptimeChecks += 1
-			}
+			game.WorkingScoreboard.ProcessUptimeCheck(check)
 			game.scoreboardMtx.Unlock()
 
 			return nil
@@ -797,15 +832,70 @@ func (game *AttackDefenseGame) StartTick() error {
 	return nil
 }
 
-func (game *AttackDefenseGame) GenerateKeys() error {
-	signer, err := GenerateKey()
+func (s *ScoreboardState) ProcessUptimeCheck(check UptimeCheck) {
+	serviceState := s.Teams[check.TeamID].Services[check.ServiceID]
+	if check.Success {
+		serviceState.SuccessfulUptimeChecks += 1
+	} else {
+		serviceState.FailedUptimeChecks += 1
+	}
+}
+
+func (game *AttackDefenseGame) RestorePersistentState() error {
+	state, err := game.Persist.GetPersistentState()
 	if err != nil {
 		return err
 	}
 
-	game.Signer = signer
-
+	game.Signer = &Signer{PrivateKey: state.FlagKey}
 	game.FlagGen = NewFlagGenerator("flag{", "}")
+	game.initializeScoreboard()
+
+	// Sort steals and checks by tick (bucket sort ftw). The last bucket is for the working state.
+	completedTicks := state.Tick - 1
+	stealsByTick := make([][]Steal, completedTicks+1)
+	for i := range completedTicks {
+		stealsByTick[i] = make([]Steal, 0)
+	}
+
+	checksByTick := make([][]UptimeCheck, completedTicks+1)
+	for i := range completedTicks {
+		checksByTick[i] = make([]UptimeCheck, 0)
+	}
+
+	err = game.Persist.ForEachFlagSteal(func(steal Steal) error {
+		i := steal.StealTick - 1
+		stealsByTick[i] = append(stealsByTick[i], steal)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	err = game.Persist.ForEachUptimeCheck(func(check UptimeCheck) error {
+		i := check.TickID - 1
+		checksByTick[i] = append(checksByTick[i], check)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Play back steals and checks to recreate the scoreboard tick-by-tick
+	game.CurrentTick = 1
+	for i := range completedTicks + 1 {
+		for _, steal := range stealsByTick[i] {
+			game.WorkingScoreboard.ProcessSteal(steal)
+		}
+		for _, check := range checksByTick[i] {
+			game.WorkingScoreboard.ProcessUptimeCheck(check)
+		}
+
+		// Don't end the last tick (because it contains the working state rather than a complete tick)
+		if i != completedTicks {
+			game.EndTick(false)
+		}
+	}
 
 	return nil
 }
@@ -973,12 +1063,6 @@ func (game *AttackDefenseGame) Run() error {
 
 	var err error
 
-	// Generate a key using age for the game.
-	// This key will be used to sign the flags.
-	if err := game.GenerateKeys(); err != nil {
-		return fmt.Errorf("failed to generate keys: %w", err)
-	}
-
 	if game.RouterMTU == 0 {
 		game.RouterMTU = 1420
 	}
@@ -1066,15 +1150,38 @@ func (game *AttackDefenseGame) Run() error {
 	return nil
 }
 
+func (game *AttackDefenseGame) Reset() error {
+	if !game.RunningState.CompareAndSwap(RunningStateStopped, RunningStateResetting) {
+		return fmt.Errorf("not stopped")
+	}
+
+	defer game.RunningState.Store(RunningStateStopped)
+
+	err := game.Persist.RemoveAllFlagSteals()
+	if err != nil {
+		return err
+	}
+	err = game.Persist.RemoveAllUptimeChecks()
+	if err != nil {
+		return err
+	}
+	err = game.Persist.ResetPersistentState()
+	if err != nil {
+		return err
+	}
+
+	game.RestorePersistentState()
+
+	return nil
+}
+
 func (game *AttackDefenseGame) Start() error {
 	if !game.RunningState.CompareAndSwap(RunningStateStopped, RunningStateStarting) {
 		return fmt.Errorf("already started")
 	}
 
 	game.Error = nil
-	game.CurrentTick = 1
 	game.instances = []TinyRangeInstance{}
-	game.initializeScoreboard()
 
 	defer game.RunningState.Store(RunningStateStopped)
 
@@ -1131,14 +1238,14 @@ outer:
 		select {
 		case <-ticker.C:
 			// End previous tick
-			game.EndTick()
+			game.EndTick(true)
 
 			// Start next tick
 			if err := game.StartTick(); err != nil {
 				slog.Error("failed to tick", "err", err)
 			}
 		case <-endTime.C:
-			game.EndTick()
+			game.EndTick(true)
 			break outer
 		}
 	}
