@@ -56,10 +56,12 @@ type TinyRangeInstance interface {
 
 	HealthCheck(check HealthCheckConfig) error
 
+	ID() int
 	TeamID() int
 }
 
 type tinyRangeInstance struct {
+	id           int
 	mtx          sync.Mutex
 	game         *AttackDefenseGame
 	wg           WireguardInstance
@@ -72,6 +74,10 @@ type tinyRangeInstance struct {
 	flows        []ParsedFlow
 	tags         TagList
 	teamID       int
+}
+
+func (t *tinyRangeInstance) ID() int {
+	return t.id
 }
 
 func (t *tinyRangeInstance) String() string {
@@ -550,12 +556,13 @@ func (t *tinyRangeInstance) Stop() error {
 	return nil
 }
 
-func NewTinyRangeInstance(game *AttackDefenseGame, name string, ip net.IP, config InstanceConfig, teamID int) (TinyRangeInstance, error) {
+func NewTinyRangeInstance(game *AttackDefenseGame, name string, ip net.IP, config InstanceConfig, teamID int, id int) (TinyRangeInstance, error) {
 	sshConfig, err := generateSSHConfig()
 	if err != nil {
 		return &tinyRangeInstance{}, fmt.Errorf("Failed to generate SSH config: %v", err)
 	}
 	return &tinyRangeInstance{
+		id:           id,
 		game:         game,
 		name:         name,
 		address:      ip,

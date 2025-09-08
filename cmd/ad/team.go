@@ -169,7 +169,7 @@ func (t *Team) Start(game *AttackDefenseGame) error {
 		return err
 	}
 	game.instanceMutex.Lock()
-	game.teamInstances[t.ID] = len(game.instances) - 1
+	game.teamInstances[t.ID] = inst.ID()
 	game.instanceMutex.Unlock()
 
 	// Run a health check.
@@ -186,7 +186,7 @@ func (t *Team) Start(game *AttackDefenseGame) error {
 			return err
 		}
 		game.instanceMutex.Lock()
-		game.botInstances[t.ID] = len(game.instances) - 1
+		game.botInstances[t.ID] = inst.ID()
 		game.instanceMutex.Unlock()
 	}
 
@@ -196,7 +196,7 @@ func (t *Team) Start(game *AttackDefenseGame) error {
 		return err
 	}
 	game.instanceMutex.Lock()
-	game.socInstances[t.ID] = len(game.instances) - 1
+	game.socInstances[t.ID] = inst.ID()
 	game.instanceMutex.Unlock()
 
 	return nil

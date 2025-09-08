@@ -433,10 +433,14 @@ func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, c
 	}
 
 	// Start the instance.
-	inst, err := NewTinyRangeInstance(game, name, net.ParseIP(ip), config, teamID)
+	game.instanceMutex.Lock()
+	id := len(game.instances)
+	inst, err := NewTinyRangeInstance(game, name, net.ParseIP(ip), config, teamID, id)
 	if err != nil {
 		return nil, err
 	}
+	game.instances = append(game.instances, inst)
+	game.instanceMutex.Unlock()
 
 	slog.Info("starting instance", "template", config.Template, "instance", inst, "name", name)
 
@@ -457,10 +461,6 @@ func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, c
 	if err := inst.Start(config.Template, wg); err != nil {
 		return nil, err
 	}
-
-	game.instanceMutex.Lock()
-	game.instances = append(game.instances, inst)
-	game.instanceMutex.Unlock()
 
 	return inst, nil
 }
