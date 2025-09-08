@@ -11,7 +11,6 @@ import (
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gomarkdown/markdown"
@@ -86,14 +85,13 @@ func (game *AttackDefenseGame) isAdmin(user User) bool {
 }
 
 func (game *AttackDefenseGame) renderScoreboard() htm.Fragment {
-	game.scoreboardMtx.RLock()
-	defer game.scoreboardMtx.RUnlock()
-
-	scoreboard := game.OverallState
-
-	if scoreboard == nil {
+	if game.RunningState.Load() != RunningStateStarted {
 		return nil
 	}
+
+	game.scoreboardMtx.RLock()
+	scoreboard := game.DisplayedScoreboardSummary
+	game.scoreboardMtx.RUnlock()
 
 	// Generate table cell contents
 	var headerRow htm.Group
@@ -119,19 +117,10 @@ func (game *AttackDefenseGame) renderScoreboard() htm.Fragment {
 	}
 
 	var rows []htm.Group
-	sortedTeams := slices.Collect(maps.Values(scoreboard.Teams))
-	slices.SortFunc(sortedTeams, func(a, b *TeamState) int {
-		diff := a.Position - b.Position
-		if diff == 0 {
-			return strings.Compare(a.Name, b.Name)
-		} else {
-			return diff
-		}
-	})
-	for _, team := range sortedTeams {
+	for _, team := range scoreboard.Teams {
 		row := htm.Group{
 			html.Textf("%d", team.Position),
-			html.Textf("%s", team.Name),
+			html.Textf("%s", game.Teams[team.ID].DisplayName),
 			html.Textf("%.2f", team.Points),
 		}
 
@@ -145,7 +134,7 @@ func (game *AttackDefenseGame) renderScoreboard() htm.Fragment {
 					html.Textf("%.2f", serviceState.TickPoints),
 					html.Textf("%.2f", serviceState.AttackPoints),
 					html.Textf("%.2f", serviceState.DefensePoints),
-					html.Textf("%d%%", int(serviceState.UptimePoints*100)),
+					html.Textf("%d%%", int(serviceState.UptimePercentage*100)),
 				)
 			}
 		}
@@ -1001,7 +990,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		game.scoreboardMtx.RLock()
 		defer game.scoreboardMtx.RUnlock()
 
-		err := json.NewEncoder(w).Encode(game.OverallState)
+		err := json.NewEncoder(w).Encode(game.DisplayedScoreboardSummary)
 		return err
 	}))
 
@@ -1020,12 +1009,13 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		game.scoreboardMtx.RLock()
 		defer game.scoreboardMtx.RUnlock()
 
-		if tick > len(game.Ticks) {
+		if tick > len(game.ScoreboardTicks) {
 			http.Error(w, "tick not found", http.StatusNotFound)
 			return nil
 		}
 
-		err = json.NewEncoder(w).Encode(game.Ticks[tick-1])
+		summary := game.ScoreboardTicks[tick-1].Summarize(int64(tick-1), game.Teams, game.Config.Scoring)
+		err = json.NewEncoder(w).Encode(summary)
 		return err
 	}))
 

@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+type UptimeCheck struct {
+	ID            int
+	TeamID        int
+	ServiceID     int
+	TickID        int
+	StartTime     time.Time
+	Duration      float64
+	Success       bool
+	FailureReason *string
+}
+
 type ScoreBotServiceConfig struct {
 	Id      int      `yaml:"id"`
 	Command string   `yaml:"command"`

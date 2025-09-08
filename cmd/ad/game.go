@@ -21,50 +21,132 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+type Steal struct {
+	ID              int
+	Flag            FlagInfo
+	AttackingTeamID int
+	StealTick       int
+	StealTime       time.Time
+}
+
 type FlagInfo struct {
-	TeamId int `json:"teamId"`
-	TickId int `json:"tickId"`
+	TeamId    int `json:"teamId"`
+	TickId    int `json:"tickId"`
+	ServiceId int `json:"serviceId"`
+}
+
+type ServiceSummary struct {
+	ID               int     `json:"id"`
+	Points           float64 `json:"points"`
+	TickPoints       float64 `json:"tickPoints"`
+	AttackPoints     float64 `json:"attackPoints"`
+	DefensePoints    float64 `json:"defensePoints"`
+	UptimePercentage float64 `json:"uptimePercentage"`
 }
 
 type ServiceState struct {
-	Name string `json:"name"`
+	// Number of flags stolen from this service.
+	FlagsLost int `json:"flagsLost"`
 
-	// Summary points of the service.
-	Points        float64 `json:"points"`
-	TickPoints    float64 `json:"tickPoints"`
-	AttackPoints  float64 `json:"attackPoints"`
-	DefensePoints float64 `json:"defensePoints"`
-	UptimePoints  float64 `json:"uptimePoints"`
-
-	// Raw data for the service.
-
-	// A list of teamIds that flags were lost to.
-	LostFlags []FlagInfo `json:"lostFlags"`
-
-	// A list of teamIds that flags were stolen from.
+	// A list of flags for this service stolen from other teams.
 	StolenFlags []FlagInfo `json:"stolenFlags"`
 
 	SuccessfulUptimeChecks int `json:"successfulUptimeChecks"`
 	FailedUptimeChecks     int `json:"failedUptimeChecks"`
 }
 
+func (s ServiceState) Summarize(completedTicks int64, id int, scoring ScoringConfig) ServiceSummary {
+	tickPoints := float64(completedTicks) * scoring.PointsPerTick
+	attackPoints := float64(len(s.StolenFlags)) * scoring.PointsPerStolenFlag
+	defensePoints := float64(s.FlagsLost) * scoring.PointsPerLostFlag
+	totalChecks := s.SuccessfulUptimeChecks + s.FailedUptimeChecks
+	uptimePercentage := float64(s.SuccessfulUptimeChecks) / float64(totalChecks)
+	if totalChecks == 0 {
+		uptimePercentage = 1
+	}
+	points := (tickPoints + attackPoints + defensePoints) * uptimePercentage
+	return ServiceSummary{
+		ID:               id,
+		Points:           points,
+		TickPoints:       tickPoints,
+		AttackPoints:     attackPoints,
+		DefensePoints:    defensePoints,
+		UptimePercentage: uptimePercentage,
+	}
+}
+
+type TeamSummary struct {
+	ID       int                     `json:"id"`
+	Points   float64                 `json:"points"`
+	Position int                     `json:"position"`
+	Services map[int]*ServiceSummary `json:"services"`
+}
+
 type TeamState struct {
-	IsBot bool   `json:"isBot"`
-	Name  string `json:"name"`
+	Services map[int]*ServiceState
+}
 
-	// Summary points of the team.
-	Points   float64 `json:"points"`
-	Position int     `json:"position"`
-
-	// Raw data for the team.
-	Services map[int]*ServiceState `json:"services"`
+func (t TeamState) Summarize(completedTicks int64, id int, scoring ScoringConfig) TeamSummary {
+	services := make(map[int]*ServiceSummary)
+	total := float64(0)
+	for serviceId, service := range t.Services {
+		summary := service.Summarize(completedTicks, serviceId, scoring)
+		services[serviceId] = &summary
+		total += summary.Points
+	}
+	return TeamSummary{
+		ID:       id,
+		Points:   total,
+		Position: 0,
+		Services: services,
+	}
 }
 
 func (t *TeamState) GetService(id int) *ServiceState { return t.Services[id] }
 
+type ScoreboardSummary struct {
+	Tick  int64         `json:"tick"`
+	Teams []TeamSummary `json:"teams"`
+}
+
 type ScoreboardState struct {
-	Tick  int64              `json:"tick"`
-	Teams map[int]*TeamState `json:"teams"`
+	Tick  int64
+	Teams map[int]*TeamState
+}
+
+func (s ScoreboardState) Summarize(completedTicks int64, teams map[int]*Team, scoring ScoringConfig) ScoreboardSummary {
+	var teamSummaries []TeamSummary
+	for id, team := range s.Teams {
+		teamSummaries = append(teamSummaries, team.Summarize(completedTicks, id, scoring))
+	}
+
+	// Sort the teams by score and then by name if tied
+	slices.SortFunc(teamSummaries, func(a, b TeamSummary) int {
+		diff := int(b.Points) - int(a.Points)
+		if diff == 0 {
+			return strings.Compare(teams[a.ID].DisplayName, teams[b.ID].DisplayName)
+		} else {
+			return diff
+		}
+	})
+
+	// Assign each team a position. Tied teams get the same position, but get sorted alphabetically so that the scoreboard ordering is stable.
+	prevPoints := float64(0)
+	position := 1
+	actualPosition := 1
+	for i, team := range teamSummaries {
+		if i != 0 && team.Points != prevPoints {
+			position = actualPosition
+		}
+		actualPosition += 1
+		teamSummaries[i].Position = position
+		prevPoints = team.Points
+	}
+
+	return ScoreboardSummary{
+		Tick:  s.Tick,
+		Teams: teamSummaries,
+	}
 }
 
 func (s *ScoreboardState) GetTeam(id int) *TeamState { return s.Teams[id] }
@@ -99,9 +181,6 @@ type AttackDefenseGame struct {
 
 	// FlagGen is the flag generator for the game.
 	FlagGen *FlagGenerator
-
-	// Ticker is a ticker that ticks every tick rate.
-	Ticker *time.Ticker
 
 	// CurrentTick is the current tick of the game.
 	CurrentTick int64
@@ -158,11 +237,19 @@ type AttackDefenseGame struct {
 	// NoInstances disables instance running and just runs the website + vpn.
 	NoInstances bool
 
+	// The state of the game (stopped, starting, or started)
+	RunningState atomic.Int32
+
+	// The mutex used to protect scoreboard-related properties of AttackDefenseGame
 	scoreboardMtx sync.RWMutex
-	RunningState  atomic.Int32
-	CurrentState  *ScoreboardState
-	Ticks         []*ScoreboardState
-	OverallState  *ScoreboardState
+	// A snapshot of the scoreboard after each completed tick
+	ScoreboardTicks []ScoreboardState
+	// The working state of the scoreboard
+	WorkingScoreboard ScoreboardState
+	// The scoreboard currently being displayed (i.e. the scoreboard as of the last completed tick)
+	DisplayedScoreboard ScoreboardState
+	// A summary of the currently displayed scoreboard (stored to avoid computing it multiple times)
+	DisplayedScoreboardSummary ScoreboardSummary
 
 	// Error that caused termination of game
 	Error error
@@ -277,10 +364,7 @@ func (game *AttackDefenseGame) teamFromTag(tag string) (team *Team, bot bool, er
 }
 
 func (game *AttackDefenseGame) flagsStolenBy(teamId int, serviceId int) []FlagInfo {
-	return append(
-		game.OverallState.Teams[teamId].Services[serviceId].StolenFlags,
-		game.CurrentState.Teams[teamId].Services[serviceId].StolenFlags...,
-	)
+	return game.WorkingScoreboard.Teams[teamId].Services[serviceId].StolenFlags
 }
 
 func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) FlagStatus {
@@ -307,11 +391,11 @@ func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) Fla
 		return InvalidService
 	}
 
-	if int64(tickId) < game.CurrentState.Tick-game.FlagValidTicks() {
+	if int64(tickId) < game.CurrentTick-game.FlagValidTicks() {
 		return FlagExpired
 	}
 
-	if int64(tickId) > game.CurrentState.Tick {
+	if int64(tickId) > game.CurrentTick {
 		return FlagNotYetValid
 	}
 
@@ -322,12 +406,13 @@ func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) Fla
 		}
 	}
 
-	ownService := game.CurrentState.Teams[submittingTeamId].Services[serviceId]
-	ownService.StolenFlags = append(ownService.StolenFlags, FlagInfo{TeamId: teamId, TickId: tickId})
+	ownService := game.WorkingScoreboard.Teams[submittingTeamId].Services[serviceId]
+	ownService.StolenFlags = append(ownService.StolenFlags,
+		FlagInfo{TeamId: teamId, TickId: tickId, ServiceId: serviceId},
+	)
 
-	otherService := game.CurrentState.Teams[teamId].Services[serviceId]
-
-	otherService.LostFlags = append(otherService.LostFlags, FlagInfo{TeamId: submittingTeamId, TickId: tickId})
+	loserService := game.WorkingScoreboard.Teams[teamId].Services[serviceId]
+	loserService.FlagsLost += 1
 
 	return FlagAccepted
 }
@@ -575,188 +660,71 @@ func (game *AttackDefenseGame) ForAllTeams(includeAdmin bool, includeBots bool, 
 	}
 }
 
-func (game *AttackDefenseGame) setServiceOverallScore(service *ServiceState) {
-	totalTicks := float64(service.SuccessfulUptimeChecks + service.FailedUptimeChecks)
-
-	// Calculate the tick points for the service.
-	service.TickPoints = totalTicks * game.Config.Scoring.PointsPerTick
-
-	// Calculate the attack points for the service.
-	service.AttackPoints = float64(len(service.StolenFlags)) * game.Config.Scoring.PointsPerStolenFlag
-
-	// Calculate the defense points for the service.
-	service.DefensePoints = float64(len(service.LostFlags)) * game.Config.Scoring.PointsPerLostFlag
-
-	// Calculate the uptime points for the service.
-	service.UptimePoints = float64(service.SuccessfulUptimeChecks) / totalTicks
-
-	// Calculate the overall score for the service.
-	service.Points = (service.TickPoints + service.AttackPoints + service.DefensePoints) * service.UptimePoints
+func (game *AttackDefenseGame) initializeScoreboard() {
+	game.WorkingScoreboard = game.makeBlankScoreboard()
+	game.DisplayedScoreboard = game.makeBlankScoreboard()
+	game.DisplayedScoreboardSummary = game.DisplayedScoreboard.Summarize(0, game.Teams, game.Config.Scoring)
 }
 
-func (game *AttackDefenseGame) setTeamOverallScore(team *TeamState) {
-	score := 0.0
-
-	for i, service := range team.Services {
-		game.setServiceOverallScore(service)
-
-		if !game.Config.Vulnbox.Services[i].Private {
-			score += service.Points
-		}
-	}
-
-	team.Points = score
-}
-
-func (game *AttackDefenseGame) summarizeState(ticks []*ScoreboardState) *ScoreboardState {
-	result := &ScoreboardState{
+func (game *AttackDefenseGame) makeBlankScoreboard() ScoreboardState {
+	scoreboard := ScoreboardState{
 		Tick:  0,
 		Teams: make(map[int]*TeamState),
 	}
 
-	// Sum up the overall raw data from each tick.
-	for _, tick := range ticks {
-		for teamId, team := range tick.Teams {
-			teamState, ok := result.Teams[teamId]
-			if !ok {
-				teamState = &TeamState{
-					IsBot: team.IsBot,
-					Name:  team.Name,
-				}
-
-				teamState.Services = make(map[int]*ServiceState)
-
-				result.Teams[teamId] = teamState
+	for _, team := range game.PlayerTeams() {
+		teamState := &TeamState{Services: make(map[int]*ServiceState)}
+		botState := &TeamState{Services: make(map[int]*ServiceState)}
+		for _, service := range game.Config.Vulnbox.Services {
+			if service.Private {
+				continue
 			}
-
-			for i, service := range team.Services {
-				serviceState, ok := teamState.Services[i]
-				if !ok {
-					serviceState = &ServiceState{
-						Name: service.Name,
-					}
-
-					teamState.Services[i] = serviceState
-				}
-
-				// Add the raw data from the service.
-				serviceState.LostFlags = append(serviceState.LostFlags, service.LostFlags...)
-				serviceState.StolenFlags = append(serviceState.StolenFlags, service.StolenFlags...)
-				serviceState.SuccessfulUptimeChecks += service.SuccessfulUptimeChecks
-				serviceState.FailedUptimeChecks += service.FailedUptimeChecks
+			serviceState := ServiceState{
+				FlagsLost:              0,
+				StolenFlags:            []FlagInfo{},
+				SuccessfulUptimeChecks: 0,
+				FailedUptimeChecks:     0,
+			}
+			teamState.Services[service.Id] = &serviceState
+			if game.Config.Vulnbox.Bot.Enabled {
+				botState.Services[service.Id] = &serviceState
 			}
 		}
+		scoreboard.Teams[team.ID] = teamState
 
-		if tick.Tick > result.Tick {
-			result.Tick = tick.Tick
+		if game.Config.Vulnbox.Bot.Enabled {
+			scoreboard.Teams[team.BotId()] = botState
 		}
 	}
 
-	// Set the overall scores and collect the teams.
-	teamPositions := make([]*TeamState, 0, len(result.Teams))
-
-	for _, team := range result.Teams {
-		game.setTeamOverallScore(team)
-
-		teamPositions = append(teamPositions, team)
-	}
-
-	// Sort the teams by score.
-	slices.SortFunc(teamPositions, func(a, b *TeamState) int {
-		return int(b.Points) - int(a.Points)
-	})
-
-	// Set the positions.
-	for i, team := range teamPositions {
-		team.Position = i + 1
-	}
-
-	return result
+	return scoreboard
 }
 
-func (game *AttackDefenseGame) updateScoreboard() error {
+func (game *AttackDefenseGame) updateScoreboard() {
 	game.scoreboardMtx.Lock()
 	defer game.scoreboardMtx.Unlock()
 
-	// Compute the overall state.
-	if game.CurrentState != nil {
-		game.CurrentState = game.summarizeState([]*ScoreboardState{game.CurrentState})
-
-		game.Ticks = append(game.Ticks, game.CurrentState)
-
-		game.OverallState = game.summarizeState(game.Ticks)
-	}
-
-	// Reset the current scoreboard state.
-	game.CurrentState = &ScoreboardState{
-		Tick:  game.CurrentTick,
-		Teams: make(map[int]*TeamState),
-	}
-
-	// Populate the new state with the teams.
-	for _, team := range game.PlayerTeams() {
-		teamState := &TeamState{
-			IsBot: false,
-			Name:  team.DisplayName,
-		}
-
-		// Populate the services for the team.
-		teamState.Services = make(map[int]*ServiceState)
-		for i, service := range game.Config.Vulnbox.Services {
-			teamState.Services[i] = &ServiceState{
-				Name: service.Name(),
-			}
-		}
-
-		// Add the team to the current state.
-		game.CurrentState.Teams[team.ID] = teamState
-
-		if game.Config.Vulnbox.Bot.Enabled {
-			// Add the bot to the current state.
-			botState := &TeamState{
-				IsBot: true,
-				Name:  team.DisplayName + "_bot",
-			}
-
-			// Populate the services for the bot.
-			botState.Services = make(map[int]*ServiceState)
-			for i, service := range game.Config.Vulnbox.Services {
-				botState.Services[i] = &ServiceState{
-					Name: service.Name(),
-				}
-			}
-
-			// Add the bot to the current state.
-			game.CurrentState.Teams[team.BotId()] = botState
-		}
-	}
-
-	if game.OverallState == nil {
-		game.OverallState = game.CurrentState
-	}
-
-	return nil
+	game.ScoreboardTicks = append(game.ScoreboardTicks, game.WorkingScoreboard)
+	game.DisplayedScoreboard = game.WorkingScoreboard
+	game.DisplayedScoreboardSummary = game.WorkingScoreboard.Summarize(game.CurrentTick, game.Teams, game.Config.Scoring)
 }
 
-func (game *AttackDefenseGame) Tick() error {
+func (game *AttackDefenseGame) EndTick() {
 	if game.CurrentTick >= game.TotalTicks() {
-		return nil
+		return
 	}
 
-	// Increment the current tick.
+	game.updateScoreboard()
 	game.CurrentTick += 1
+}
 
+func (game *AttackDefenseGame) StartTick() error {
 	slog.Info("tick", "num", game.CurrentTick)
 
 	ctx, cancel := context.WithTimeout(context.Background(), game.scaleDuration(game.Config.TickRate.Duration))
 	defer cancel()
 
 	start := time.Now()
-
-	if err := game.updateScoreboard(); err != nil {
-		slog.Error("failed to update scoreboard", "err", err)
-		return err
-	}
 
 	// Run any events that are scheduled for this tick at the start of the tick.
 	for _, ev := range game.EventQueue {
@@ -769,8 +737,6 @@ func (game *AttackDefenseGame) Tick() error {
 
 	// Send the scorebot command to each team.
 	if err := game.ForAllTeams(false, true, false, func(t *Team, info TargetInfo) error {
-		start := time.Now()
-
 		// Run the scorebot for each service.
 		if err := game.Config.ScoreBot.ForEachService(func(service *ScoreBotServiceConfig) error {
 			// Delay this randomly during the tick interval.
@@ -779,6 +745,8 @@ func (game *AttackDefenseGame) Tick() error {
 			delay := time.Duration(rand.Intn(int(totalTickTime.Milliseconds())/2)) * time.Millisecond
 
 			time.Sleep(delay)
+
+			start := time.Now()
 
 			subCtx, cancel := context.WithTimeout(ctx, game.scaleDuration(service.Timeout.Duration))
 			defer cancel()
@@ -801,13 +769,14 @@ func (game *AttackDefenseGame) Tick() error {
 			)
 
 			// Update the service state.
+			game.scoreboardMtx.Lock()
+			serviceState := game.WorkingScoreboard.Teams[info.ID].Services[service.Id]
 			if success {
-				serviceState := game.CurrentState.Teams[info.ID].Services[service.Id]
 				serviceState.SuccessfulUptimeChecks += 1
 			} else {
-				serviceState := game.CurrentState.Teams[info.ID].Services[service.Id]
 				serviceState.FailedUptimeChecks += 1
 			}
+			game.scoreboardMtx.Unlock()
 
 			return nil
 		}); err != nil {
@@ -1103,8 +1072,9 @@ func (game *AttackDefenseGame) Start() error {
 	}
 
 	game.Error = nil
-	game.CurrentTick = -1
+	game.CurrentTick = 1
 	game.instances = []TinyRangeInstance{}
+	game.initializeScoreboard()
 
 	defer game.RunningState.Store(RunningStateStopped)
 
@@ -1125,16 +1095,6 @@ func (game *AttackDefenseGame) Start() error {
 		return fmt.Errorf("failed to start team instances: %w", err)
 	}
 
-	// for _, team := range game.Teams {
-	// 	if team.IsAdmin() {
-	// 		continue
-	// 	}
-	// 	err := team.Start(game)
-	// 	if err != nil {
-	// 		return fmt.Errorf("failed to start team '%s': %w", team.DisplayName, err)
-	// 	}
-	// }
-
 	if game.Config.Wait {
 		// Wait for a event to start the game.
 		slog.Info("waiting for event to start game")
@@ -1151,39 +1111,39 @@ func (game *AttackDefenseGame) Start() error {
 	}
 
 	// Log the start of the game.
-	slog.Info("game starting", "completes", time.Now().Add(game.scaleDuration(game.Config.Duration.Duration)), "totalTicks", game.TotalTicks())
+	slog.Info("game starting", "completesAt", time.Now().Add(game.scaleDuration(game.Config.Duration.Duration)), "totalTicks", game.TotalTicks())
 
 	game.RunningState.Store(RunningStateStarted)
 
 	// Create a new ticker for the game.
-	game.Ticker = time.NewTicker(game.scaleDuration(game.Config.TickRate.Duration))
+	ticker := time.NewTicker(game.scaleDuration(game.Config.TickRate.Duration))
 
 	// Create a new timer for the end of the game.
 	endTime := time.NewTimer(game.scaleDuration(game.Config.Duration.Duration))
 
 	// First tick
-	if err := game.Tick(); err != nil {
+	if err := game.StartTick(); err != nil {
 		slog.Error("failed to tick", "err", err)
 	}
 
 outer:
 	for {
 		select {
-		case <-game.Ticker.C:
-			if err := game.Tick(); err != nil {
+		case <-ticker.C:
+			// End previous tick
+			game.EndTick()
+
+			// Start next tick
+			if err := game.StartTick(); err != nil {
 				slog.Error("failed to tick", "err", err)
 			}
 		case <-endTime.C:
+			game.EndTick()
 			break outer
 		}
 	}
 
-	if err := game.updateScoreboard(); err != nil {
-		slog.Error("failed to update scoreboard", "err", err)
-	}
-
 	slog.Info("game complete")
-
 	return nil
 }
 
