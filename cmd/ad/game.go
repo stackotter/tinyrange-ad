@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -440,11 +441,36 @@ func (game *AttackDefenseGame) cacheTinyRangeTemplate(templateFilename string, r
 
 	resolvedFilename := game.ResolvePath(templateFilename)
 
+	overlayInitScript := path.Join(game.PersistenceDir, "overlayfs.star")
+	if _, err := os.Stat(overlayInitScript); os.IsNotExist(err) {
+		err := os.WriteFile(overlayInitScript, []byte(`def bind(src, dest):
+    if path_exists("/bin/busybox"):
+        run("/bin/busybox", "mount", "-o", "bind", src, dest)
+    else:
+        run("/bin/mount", "--bind", src, dest)
+
+def main():
+    path_ensure("/overlay/work")
+    mount("overlay", "overlay", "/overlay/overlay", ensure_path=True, options="lowerdir=/,upperdir=/overlay/overlay,workdir=/overlay/work")
+
+    bind("/dev", "/overlay/overlay/dev")
+    bind("/dev/pts", "/overlay/overlay/dev/pts")
+    bind("/proc", "/overlay/overlay/proc")
+    bind("/sys", "/overlay/overlay/sys")
+
+    chroot("/overlay/overlay")`), 0755)
+
+		if err != nil {
+			return fmt.Errorf("failed to create overlayfs init script: %v", err)
+		}
+	}
+
 	args := []string{
 		game.TinyRangePath, "login",
 		"--template",
 		"--load-config", resolvedFilename,
-		"--storage", "4096",
+		"--volume", "overlay,4096,/overlay,persist",
+		"--file", fmt.Sprintf("%s:/init.d/overlayfs.star", overlayInitScript),
 	}
 
 	if ram != "" {
@@ -453,6 +479,10 @@ func (game *AttackDefenseGame) cacheTinyRangeTemplate(templateFilename string, r
 
 	if *verbose {
 		args = append(args, "--verbose")
+	}
+
+	if *debug {
+		args = append(args, "--debug")
 	}
 
 	if game.rebuildTemplates {

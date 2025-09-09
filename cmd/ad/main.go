@@ -31,6 +31,7 @@ var (
 	tinyrangePath    = flag.String("tinyrange", "", "The path to the tinyrange binary.")
 	tinyrangeVMMPath = flag.String("tinyrange-vmm", "", "The path to the tinyrange driver binary.")
 	verbose          = flag.Bool("verbose", false, "Enable verbose logging.")
+	debug            = flag.Bool("debug", false, "Enable debug console.")
 	sshServer        = flag.String("ssh-server", "", "The SSH server to listen on.")
 	sshServerHostKey = flag.String("ssh-server-host-key", "", "The SSH server host key.")
 	cpuprofile       = flag.String("cpuprofile", "", "write cpu profile to file")
@@ -76,7 +77,10 @@ func appMain() error {
 
 	configName := strings.TrimSuffix(filepath.Base(*configFile), filepath.Ext(*configFile))
 
-	persistDir := filepath.Join(*persistancePath, configName)
+	persistDir, err := filepath.Abs(filepath.Join(*persistancePath, configName))
+	if err != nil {
+		return err
+	}
 	dbFile := filepath.Join(persistDir, "persist.db")
 
 	slog.Info("persisting to", "dir", persistDir)

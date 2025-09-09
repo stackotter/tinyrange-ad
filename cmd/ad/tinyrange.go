@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"runtime"
 	"strings"
 	"sync"
@@ -217,11 +218,19 @@ func (t *tinyRangeInstance) Start(templateName string, wg WireguardInstance) err
 		return fmt.Errorf("failed to write ssh config to temp file: %v", err)
 	}
 
+	persistPath := path.Join(t.game.PersistenceDir, fmt.Sprintf("persist_%s", t.address.String()))
+	if _, err := os.Stat(persistPath); os.IsNotExist(err) {
+		err := os.Mkdir(persistPath, 0755)
+		if err != nil {
+			return fmt.Errorf("failed to create persist path: %v", err)
+		}
+	}
+
 	args := []string{
 		t.game.TinyRangeVMMPath,
 		"-wireguard-url", wg.ConfigUrl(),
 		"-secure-ssh", secureSSHPath.Name(),
-		"-persist-path", t.game.PersistenceDir,
+		"-persist-path", persistPath,
 	}
 
 	secureSSHPath.Close()
@@ -230,11 +239,18 @@ func (t *tinyRangeInstance) Start(templateName string, wg WireguardInstance) err
 		args = append(args, "-verbose")
 	}
 
+	if *debug {
+		args = append(args, "-debug")
+	}
+
 	args = append(args, template)
 
 	// Run `tinyrange run-vm <template>` to start the instance.
 	cmd := exec.Command(args[0], args[1:]...)
 
+	if *debug {
+		cmd.Stdout = os.Stdout
+	}
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
@@ -321,7 +337,7 @@ func (t *tinyRangeInstance) RunCommand(ctx context.Context, command string) (str
 	// Run the command.
 	out, err := session.CombinedOutput(command)
 	if err != nil && err != io.EOF {
-		return string(out), fmt.Errorf("failed to run command: %w", err)
+		return string(out), fmt.Errorf("failed to run command: %w, (out=%q)", err, out)
 	}
 
 	// slog.Info("command output", "instance", t.instanceId, "output", string(out))
