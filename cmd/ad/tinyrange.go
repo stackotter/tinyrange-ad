@@ -229,6 +229,7 @@ func (t *tinyRangeInstance) Start(templateName string, wg WireguardInstance) err
 	args := []string{
 		t.game.TinyRangeVMMPath,
 		"-wireguard-url", wg.ConfigUrl(),
+		"-wireguard-guest-ip", t.address.String(),
 		"-secure-ssh", secureSSHPath.Name(),
 		"-persist-path", persistPath,
 	}
@@ -320,7 +321,7 @@ func (t *tinyRangeInstance) RunCommand(ctx context.Context, command string) (str
 
 	// The instance is listening on SSH on port 2222.
 	// Use the hardcoded password "insecurepassword" to login.
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, ipPort(VM_IP, VM_SSH_PORT), config)
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, ipPort(t.address.String(), VM_SSH_PORT), config)
 	if err != nil {
 		return "", fmt.Errorf("failed to create ssh client: %w", err)
 	}
@@ -464,7 +465,7 @@ func (t *tinyRangeInstance) WebSSHHandler(ws *websocket.Conn) error {
 			continue
 		}
 
-		c, chans, reqs, err = ssh.NewClientConn(conn, ipPort(VM_IP, VM_SSH_PORT), config)
+		c, chans, reqs, err = ssh.NewClientConn(conn, ipPort(t.address.String(), VM_SSH_PORT), config)
 		if err != nil {
 			if !errors.Is(err, context.DeadlineExceeded) {
 				slog.Debug("failed to connect", "err", err)

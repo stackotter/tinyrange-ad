@@ -469,8 +469,8 @@ def main():
 		game.TinyRangePath, "login",
 		"--template",
 		"--load-config", resolvedFilename,
-		"--volume", "overlay,4096,/overlay,persist",
-		"--file", fmt.Sprintf("%s:/init.d/overlayfs.star", overlayInitScript),
+		// "--volume", "overlay,4096,/overlay,persist",
+		// "--file", fmt.Sprintf("%s:/init.d/overlayfs.star", overlayInitScript),
 	}
 
 	if ram != "" {
@@ -574,14 +574,14 @@ func (game *AttackDefenseGame) StartInstanceFromConfig(name string, ip string, c
 	game.instances = append(game.instances, inst)
 	game.instanceMutex.Unlock()
 
-	slog.Info("starting instance", "template", config.Template, "instance", inst, "name", name)
+	slog.Info("starting instance", "template", config.Template, "instance", inst, "name", name, "ip", ip)
 
 	handler, err := game.Flow.AddInstance(inst)
 	if err != nil {
 		return nil, err
 	}
 
-	wg, err := game.Router.AddEndpoint(handler, VM_IP)
+	wg, err := game.Router.AddEndpoint(handler, ip)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,32 +1097,10 @@ func (game *AttackDefenseGame) Run() error {
 		game.RouterMTU = 1420
 	}
 
-	game.Router, err = NewWireguardRouter(game.ListenIP, game.ExternalIP, game.RouterMTU, game.FrontendUrl())
-	if err != nil {
-		return fmt.Errorf("failed to create wireguard router: %w", err)
-	}
-
 	game.Flow = NewFlowRouter()
 
 	if _, err := game.Flow.AddInstance(game); err != nil {
 		return fmt.Errorf("failed to add host to flow router: %w", err)
-	}
-
-	// Start the built in web server.
-	if err := game.startPublicServer(); err != nil {
-		return fmt.Errorf("failed to start server: %w", err)
-	}
-
-	// Register the services on wireguard player network.
-	if err := game.registerInternalServices(); err != nil {
-		return fmt.Errorf("failed to register internal services: %w", err)
-	}
-
-	if game.SshServer != "" {
-		// Start the SSH server.
-		if err := game.startSshServer(); err != nil {
-			return fmt.Errorf("failed to start ssh server: %w", err)
-		}
 	}
 
 	// Register events for the game.
@@ -1146,6 +1124,11 @@ func (game *AttackDefenseGame) Run() error {
 	})
 
 	// Load all existing device configurations.
+	devices := make([]struct {
+		Config  string
+		Handler NetHandler
+		Device  *Device
+	}, 0)
 	if err := game.Persist.ForEachDevice(func(device DeviceConfig) error {
 		dev, err := game.createDevice(device)
 		dev.id = device.ID
@@ -1162,19 +1145,41 @@ func (game *AttackDefenseGame) Run() error {
 			return fmt.Errorf("device missing wireguard config string: id=%d, name=%q", device.ID, device.Name)
 		}
 
-		wg, err := game.Router.RestoreDevice(*device.Config, handler)
-		if err != nil {
-			return err
-		}
-
-		dev.wg = wg
 		game.instanceMutex.Lock()
 		game.devices = append(game.devices, dev)
 		game.instanceMutex.Unlock()
 
+		devices = append(devices, struct {
+			Config  string
+			Handler NetHandler
+			Device  *Device
+		}{*device.Config, handler, dev})
+
 		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to load devices: %w", err)
+	}
+
+	game.Router, err = NewWireguardRouter(game.ListenIP, game.ExternalIP, game.RouterMTU, game.FrontendUrl(), game.Persist, devices)
+	if err != nil {
+		return fmt.Errorf("failed to create wireguard router: %w", err)
+	}
+
+	// Start the built in web server.
+	if err := game.startPublicServer(); err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
+	}
+
+	// Register the services on wireguard player network.
+	if err := game.registerInternalServices(); err != nil {
+		return fmt.Errorf("failed to register internal services: %w", err)
+	}
+
+	if game.SshServer != "" {
+		// Start the SSH server.
+		if err := game.startSshServer(); err != nil {
+			return fmt.Errorf("failed to start ssh server: %w", err)
+		}
 	}
 
 	return nil

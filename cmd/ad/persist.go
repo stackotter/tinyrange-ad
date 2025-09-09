@@ -73,7 +73,8 @@ func CreateDatabaseConnection(file string) (*PersistDatabase, error) {
 	);
 	create table state (
 		tick integer not null,
-		flag_key blob not null
+		flag_key blob not null,
+		wg_server_config text
 	);
 	create table flag_steals (
 		id integer not null primary key,
@@ -208,31 +209,34 @@ func (db *PersistDatabase) queryOne(query string, args ...interface{}) (*sql.Row
 }
 
 type PersistentState struct {
-	Tick    int64
-	FlagKey ed25519.PrivateKey
+	Tick                  int64
+	FlagKey               ed25519.PrivateKey
+	WireguardServerConfig *string
 }
 
 func (db *PersistDatabase) GetPersistentState() (PersistentState, error) {
-	row, err := db.queryOne("select tick, flag_key from state")
+	row, err := db.queryOne("select tick, flag_key, wg_server_config from state")
 	if err != nil {
 		return PersistentState{}, err
 	}
 
 	var tick int64
 	var flagKey []byte
-	err = row.Scan(&tick, &flagKey)
+	var wireguardServerConfig *string
+	err = row.Scan(&tick, &flagKey, &wireguardServerConfig)
 	if err != nil {
 		return PersistentState{}, err
 	}
 
 	return PersistentState{
-		Tick:    tick,
-		FlagKey: flagKey,
+		Tick:                  tick,
+		FlagKey:               flagKey,
+		WireguardServerConfig: wireguardServerConfig,
 	}, nil
 }
 
 func (db *PersistDatabase) UpdatePersistentState(state PersistentState) error {
-	_, err := db.exec("update state set tick=?, flag_key=?", state.Tick, state.FlagKey)
+	_, err := db.exec("update state set tick=?, flag_key=?, wg_server_config=?", state.Tick, state.FlagKey, state.WireguardServerConfig)
 	return err
 }
 
@@ -242,12 +246,22 @@ func (db *PersistDatabase) ResetPersistentState() error {
 		return fmt.Errorf("failed to generate flag signing key: %v", err)
 	}
 
-	err = db.UpdatePersistentState(PersistentState{Tick: 1, FlagKey: flagKey.PrivateKey})
+	state, err := db.GetPersistentState()
+	if err != nil {
+		return fmt.Errorf("failed to get existing persistent state: %v", err)
+	}
+
+	err = db.UpdatePersistentState(PersistentState{Tick: 1, FlagKey: flagKey.PrivateKey, WireguardServerConfig: state.WireguardServerConfig})
 	return err
 }
 
 func (db *PersistDatabase) UpdateTick(tick int64) error {
 	_, err := db.exec("update state set tick=?", tick)
+	return err
+}
+
+func (db *PersistDatabase) UpdateWireguardServerConfig(config *string) error {
+	_, err := db.exec("update state set wg_server_config=?", config)
 	return err
 }
 

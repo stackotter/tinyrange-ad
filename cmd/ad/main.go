@@ -40,7 +40,7 @@ var (
 	wait             = flag.Bool("wait", false, "Wait for manual confirmation before starting the game.")
 	waitAfter        = flag.Bool("wait-after", false, "Keep services up after the game is complete.")
 	listenIp         = flag.String("listen-ip", "127.0.0.1", "The IP to listen on.")
-	externalIp       = flag.String("extern-ip", "", "The external IP of the server (can differ from -ip if using a proxy etc).")
+	externalIp       = flag.String("extern-ip", "", "The external IP of the server (can differ from -listen-ip if using a proxy etc).")
 	publicPort       = flag.Int("port", 5100, "The public port of the server.")
 	persistancePath  = flag.String("persist-path", "local/persist", "The directory to persist game data to")
 	routerMTU        = flag.Int("router-mtu", 1420, "The MTU of the router.")

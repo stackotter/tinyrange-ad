@@ -170,6 +170,7 @@ func (h *flowRouterHandler) Hostname() string {
 // HandleConn implements NetHandler.
 func (f *flowRouterHandler) HandleConn(network string, ip net.IP, port uint16, conn net.Conn) {
 	slog.Debug("handling connection", "source", f.instance.Hostname(), "ip", ip, "port", port)
+	slog.Info("handling connection", "source", conn.RemoteAddr(), "dest", conn.LocalAddr())
 
 	// find the target by IP
 	f.router.mtx.RLock()

@@ -16,8 +16,6 @@ const (
 	HOST_IP     = "10.40.0.1"
 	SCOREBOT_IP = "10.40.0.10"
 
-	VM_IP = "10.42.0.2"
-
 	VM_SSH_PORT = 2222
 )
 
