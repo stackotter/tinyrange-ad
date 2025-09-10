@@ -366,6 +366,7 @@ func (game *AttackDefenseGame) teamFromTag(tag string) (team *Team, bot bool, er
 }
 
 func (game *AttackDefenseGame) flagsStolenBy(teamId int, serviceId int) []FlagInfo {
+	slog.Info("team", "id", teamId, "serviceId", serviceId, "scoreboard", game.WorkingScoreboard)
 	return game.WorkingScoreboard.Teams[teamId].Services[serviceId].StolenFlags
 }
 
@@ -423,6 +424,8 @@ func (game *AttackDefenseGame) submitFlag(submittingTeamId int, flag string) (Fl
 	if err != nil {
 		return FlagAccepted, fmt.Errorf("Failed to save flag steal to db: %v", err)
 	}
+
+	game.WorkingScoreboard.ProcessSteal(steal)
 
 	return FlagAccepted, nil
 }

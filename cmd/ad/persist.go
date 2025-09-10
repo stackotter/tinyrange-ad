@@ -268,7 +268,7 @@ func (db *PersistDatabase) UpdateWireguardServerConfig(config *string) error {
 func (db *PersistDatabase) InsertFlagSteal(steal *Steal) (int, error) {
 	id, err := db.exec(
 		"insert into flag_steals(attacking_team, defending_team, service, steal_tick, flag_tick, time) values(?, ?, ?, ?, ?, ?)",
-		steal.AttackingTeamID, steal.Flag.TeamId, steal.Flag.ServiceId, steal.StealTick, steal.StealTime.Unix(),
+		steal.AttackingTeamID, steal.Flag.TeamId, steal.Flag.ServiceId, steal.StealTick, steal.Flag.TickId, steal.StealTime.Unix(),
 	)
 	if err != nil {
 		return id, err

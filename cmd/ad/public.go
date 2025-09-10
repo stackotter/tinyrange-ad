@@ -75,6 +75,20 @@ func (game *AttackDefenseGame) requireAuthentication(w http.ResponseWriter, r *h
 	return user, *team, nil
 }
 
+func (game *AttackDefenseGame) requireTeam(w http.ResponseWriter, r *http.Request) (Team, error) {
+	teamInfo, ok := r.Context().Value(CONTEXT_KEY_TEAM).(TargetInfo)
+	if !ok {
+		_, team, err := game.requireAuthentication(w, r)
+		if err != nil {
+			return Team{}, err
+		} else {
+			return team, nil
+		}
+	} else {
+		return game.Persist.GetTeam(teamInfo.ID)
+	}
+}
+
 func (game *AttackDefenseGame) isAdmin(user User) bool {
 	team, err := game.Persist.GetTeam(user.TeamID)
 	if err != nil {
@@ -324,6 +338,22 @@ func (game *AttackDefenseGame) authenticatedRoute(
 		err = handler(w, r, user, team)
 		if err != nil {
 			game.renderError(w, r, err, &user)
+		}
+	}
+}
+
+func (game *AttackDefenseGame) teamRoute(
+	handler func(w http.ResponseWriter, r *http.Request, team Team) error,
+) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		team, err := game.requireTeam(w, r)
+		if err != nil {
+			game.renderError(w, r, err, nil)
+			return
+		}
+		err = handler(w, r, team)
+		if err != nil {
+			game.renderError(w, r, err, nil)
 		}
 	}
 }
@@ -1046,7 +1076,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 		return err
 	}))
 
-	handler.HandleFunc("GET /api/teams", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, playerTeam Team) error {
+	handler.HandleFunc("GET /api/teams", game.teamRoute(func(w http.ResponseWriter, r *http.Request, playerTeam Team) error {
 		teams := make([]teamApiResponse, len(game.PlayerTeams()))
 
 		for i, team := range game.PlayerTeams() {
@@ -1076,7 +1106,7 @@ func (game *AttackDefenseGame) startPublicServer() error {
 	})
 
 	// An endpoint for submitting flags.
-	handler.HandleFunc("POST /api/flag", game.authenticatedRoute(func(w http.ResponseWriter, r *http.Request, user User, team Team) error {
+	handler.HandleFunc("POST /api/flag", game.teamRoute(func(w http.ResponseWriter, r *http.Request, team Team) error {
 		flag := r.FormValue("flag")
 		if flag == "" {
 			http.Error(w, "flag not found", http.StatusBadRequest)
